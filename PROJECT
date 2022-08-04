@@ -4,4 +4,30 @@ layout:
 multigroup: true
 projectName: nephio
 repo: github.com/nephio-project/nephio
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: nephio.org
+  group: automation
+  kind: PackageDeployment
+  path: github.com/nephio-project/nephio/apis/automation/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: nephio.org
+  group: infra
+  kind: Cluster
+  path: github.com/nephio-project/nephio/apis/infra/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: nephio.org
+  group: infra
+  kind: ClusterScaleProfile
+  path: github.com/nephio-project/nephio/apis/infra/v1alpha1
+  version: v1alpha1
 version: "3"

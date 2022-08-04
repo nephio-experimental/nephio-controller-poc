@@ -1,0 +1,6 @@
+apiVersion: infra.nephio.org/v1alpha1
+kind: ClusterScaleProfile
+metadata:
+  name: clusterscaleprofile-sample
+spec:
+  # TODO(user): Add fields here

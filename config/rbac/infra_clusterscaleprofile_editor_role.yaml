@@ -1,0 +1,24 @@
+# permissions for end users to edit clusterscaleprofiles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clusterscaleprofile-editor-role
+rules:
+- apiGroups:
+  - infra.nephio.org
+  resources:
+  - clusterscaleprofiles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infra.nephio.org
+  resources:
+  - clusterscaleprofiles/status
+  verbs:
+  - get

@@ -1,0 +1,6 @@
+apiVersion: automation.nephio.org/v1alpha1
+kind: PackageDeployment
+metadata:
+  name: packagedeployment-sample
+spec:
+  # TODO(user): Add fields here
