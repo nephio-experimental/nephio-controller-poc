@@ -1,0 +1,33 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  creationTimestamp: null
+  name: manager-role
+rules:
+- apiGroups:
+  - automation.nephio.org
+  resources:
+  - packagedeployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - automation.nephio.org
+  resources:
+  - packagedeployments/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - automation.nephio.org
+  resources:
+  - packagedeployments/status
+  verbs:
+  - get
+  - patch
+  - update

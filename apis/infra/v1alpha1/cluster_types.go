@@ -17,37 +17,24 @@ limitations under the License.
 package v1alpha1
 
 import (
+	automationv1alpha1 "github.com/nephio-project/nephio/apis/automation/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// ClusterSpec defines the desired state of Cluster
-type ClusterSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// Foo is an example field of Cluster. Edit cluster_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
-}
-
-// ClusterStatus defines the observed state of Cluster
-type ClusterStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-}
-
 //+kubebuilder:object:root=true
-//+kubebuilder:subresource:status
 
 // Cluster is the Schema for the clusters API
 type Cluster struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   ClusterSpec   `json:"spec,omitempty"`
-	Status ClusterStatus `json:"status,omitempty"`
+	// ScaleProfileName contains the name of a ClusterScaleProfile in the same namespace,
+	// which provides cluster scaling characteristics
+	// +optional
+	ScaleProfileName *string `json:"scaleProfileName,omitempty"`
+
+	// RepositoryRef identifies the deployment repository for this cluster
+	RepositoryRef automationv1alpha1.RepositoryReference `json:"repositoryRef"`
 }
 
 //+kubebuilder:object:root=true

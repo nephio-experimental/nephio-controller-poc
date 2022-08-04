@@ -20,34 +20,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// ClusterScaleProfileSpec defines the desired state of ClusterScaleProfile
-type ClusterScaleProfileSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// Foo is an example field of ClusterScaleProfile. Edit clusterscaleprofile_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
-}
-
-// ClusterScaleProfileStatus defines the observed state of ClusterScaleProfile
-type ClusterScaleProfileStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-}
-
 //+kubebuilder:object:root=true
-//+kubebuilder:subresource:status
 
 // ClusterScaleProfile is the Schema for the clusterscaleprofiles API
 type ClusterScaleProfile struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   ClusterScaleProfileSpec   `json:"spec,omitempty"`
-	Status ClusterScaleProfileStatus `json:"status,omitempty"`
+	// Autoscaling indicates whether or not this cluster supports cluster
+	// autoscaler.
+	Autoscaling *bool `json:"autoscaling,omitempty"`
+
+	// NodeMax indicates the number of nodes for non-autoscaling clusters,
+	// and the maximum number of nodes for autoscaling clusters
+	NodeMax *int32 `json:"nodeMax,omitempty"`
+
+	// SiteDensity indicates the population density at the site in which the
+	// cluster is located.
+	SiteDensity *string `json:"siteDensity,omitempty"`
 }
 
 //+kubebuilder:object:root=true

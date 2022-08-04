@@ -20,22 +20,52 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// RepositoryReference is used to refer to a repository resource.
+type RepositoryReference struct {
+	// Name is unique within a namespace to reference a repository resource.
+	// +optional
+	Name string `json:"name"`
+
+	// Namespace defines the space within which the repository name must be unique.
+	// +optional
+	Namespace string `json:"namespace"`
+}
+
+// PackageRevisionReference is used to reference a particular package revision.
+type PackageRevisionReference struct {
+	// Namespace is the namespace for both the repository and package revision
+	// +optional
+	Namespace string `json:"namespace"`
+
+	// RepositoryName is the name of the repository containing the package
+	// +optional
+	RepositoryName string `json:"repositoryName"`
+
+	// PackageName is the name of the package for the revision
+	// +optional
+	PackageName string `json:"packageName"`
+
+	// PackageVersion is the specific version number of the revision of the package
+	// +optional
+	PackageVersion string `json:"packageVersion"`
+}
 
 // PackageDeploymentSpec defines the desired state of PackageDeployment
 type PackageDeploymentSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Label selector for Clusters on which to deploy the package
+	Selector *metav1.LabelSelector `json:"selector,omitempty"`
 
-	// Foo is an example field of PackageDeployment. Edit packagedeployment_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// PackageRef identifies the package revision to deploy
+	PackageRef PackageRevisionReference `json:"packageRef"`
+
+	// Namespace identifies the namespace in which to deploy the package
+	// The namespace will be added to the resource list of the package
+	// If not present, the package will be installed in the default namespace
+	Namespace *string `json:"namespace,omitempty"`
 }
 
 // PackageDeploymentStatus defines the observed state of PackageDeployment
 type PackageDeploymentStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
 }
 
 //+kubebuilder:object:root=true
