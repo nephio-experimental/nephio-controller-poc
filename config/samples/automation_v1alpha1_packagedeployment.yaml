@@ -1,6 +1,14 @@
 apiVersion: automation.nephio.org/v1alpha1
 kind: PackageDeployment
 metadata:
-  name: packagedeployment-sample
+  name: aggregation-caching-dns
 spec:
-  # TODO(user): Add fields here
+  selector:
+    matchLabels:
+      nephio.org/region: us-central1
+      nephio.org/site-type: aggregation
+  namespace: caching-dns
+  packageRef:
+    repository: nephio-packages
+    packageName: coredns-caching
+    revision: v1

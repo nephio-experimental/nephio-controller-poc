@@ -22,32 +22,28 @@ import (
 
 // RepositoryReference is used to refer to a repository resource.
 type RepositoryReference struct {
-	// Name is unique within a namespace to reference a repository resource.
-	// +optional
-	Name string `json:"name"`
-
 	// Namespace defines the space within which the repository name must be unique.
 	// +optional
-	Namespace string `json:"namespace"`
+	Namespace string `json:"namespace,omitempty"`
+
+	// Name is unique within a namespace to reference a repository resource.
+	Name string `json:"name"`
 }
 
 // PackageRevisionReference is used to reference a particular package revision.
 type PackageRevisionReference struct {
 	// Namespace is the namespace for both the repository and package revision
 	// +optional
-	Namespace string `json:"namespace"`
+	Namespace string `json:"namespace,omitempty"`
 
-	// RepositoryName is the name of the repository containing the package
-	// +optional
-	RepositoryName string `json:"repositoryName"`
+	// Repository is the name of the repository containing the package
+	RepositoryName string `json:"repository"`
 
 	// PackageName is the name of the package for the revision
-	// +optional
 	PackageName string `json:"packageName"`
 
-	// PackageVersion is the specific version number of the revision of the package
-	// +optional
-	PackageVersion string `json:"packageVersion"`
+	// Revision is the specific version number of the revision of the package
+	Revision string `json:"revision"`
 }
 
 // PackageDeploymentSpec defines the desired state of PackageDeployment

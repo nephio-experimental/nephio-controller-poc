@@ -51,14 +51,18 @@ spec:
                   packageName:
                     description: PackageName is the name of the package for the revision
                     type: string
-                  packageVersion:
-                    description: PackageVersion is the specific version number of
-                      the revision of the package
-                    type: string
-                  repositoryName:
-                    description: RepositoryName is the name of the repository containing
+                  repository:
+                    description: Repository is the name of the repository containing
                       the package
                     type: string
+                  revision:
+                    description: Revision is the specific version number of the revision
+                      of the package
+                    type: string
+                required:
+                - packageName
+                - repository
+                - revision
                 type: object
               selector:
                 description: Label selector for Clusters on which to deploy the package

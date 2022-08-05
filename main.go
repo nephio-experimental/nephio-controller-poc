@@ -34,6 +34,7 @@ import (
 	automationv1alpha1 "github.com/nephio-project/nephio/apis/automation/v1alpha1"
 	infrav1alpha1 "github.com/nephio-project/nephio/apis/infra/v1alpha1"
 	automationcontrollers "github.com/nephio-project/nephio/controllers/automation"
+	"github.com/nephio-project/nephio/pkg/porch"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -91,9 +92,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	porchClient, err := porch.CreateClient()
+	if err != nil {
+		setupLog.Error(err, "unable to create porch client")
+		os.Exit(1)
+	}
+
 	if err = (&automationcontrollers.PackageDeploymentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		PorchClient: porchClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PackageDeployment")
 		os.Exit(1)

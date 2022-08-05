@@ -44,6 +44,8 @@ spec:
                 description: Namespace defines the space within which the repository
                   name must be unique.
                 type: string
+            required:
+            - name
             type: object
           scaleProfileName:
             description: ScaleProfileName contains the name of a ClusterScaleProfile
