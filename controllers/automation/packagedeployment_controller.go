@@ -120,10 +120,8 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// associated cluster version.
 	//
 	for _, c := range clusterList.Items {
-		// Find the repo associated with the cluster
-
-		// Clone the package from upstream to the repo
-		err = r.clonePackageRevision(ctx, pd, &c, sourcePR)
+		// Clone or update the package from upstream to the repo
+		err = r.ensurePackageRevision(ctx, pd, &c, sourcePR)
 		if err != nil {
 			r.l.Error(err, "could not clone package")
 			return ctrl.Result{}, err
@@ -212,16 +210,35 @@ func (r *PackageDeploymentReconciler) findPackageRevision(ns, repo, pkg, rev str
 	return r.packageRevs[ns][repo][pkg][rev]
 }
 
-func (r *PackageDeploymentReconciler) clonePackageRevision(ctx context.Context,
+func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 	pd *automationv1alpha1.PackageDeployment,
 	c *infrav1alpha1.Cluster,
 	sourcePR *porchv1alpha1.PackageRevision) error {
 
+	// What we SHOULD do in here is:
+	//   - Check if the target repo has the package already
+	//   - If not, clone it and we're done. Otherwise continue
+	//   - Compare the UPSTREAM (base) revision of the package against
+	//     the package in the PackageDeployment. Note that the revision
+	//     stored in r.packageRevs will contain the LOCAL (downstream)
+	//     revision number of the package, so we CANNOT directly compare
+	//     them.
+	//   - If the PackageDeployment revision is different from the UPSTREAM
+	//     revision of the package, then update the package to that revision
+	//     (which could be an upgrade OR downgrade).
+	//
+	// What we ACTUALLY do in here is:
+	//   - Just the first thing - clone it - no updates
+	//
 	ns := "default"
 	if pd.Namespace != "" {
 		ns = pd.Namespace
 	}
 
+	// We SHOULD be adding an ownerRef with the controller and PD info,
+	// This would be to facilitate pruning. I am not sure if the aggregated
+	// API server in Porch supports this; if not we need to add it.
+	//
 	newPR := &porchv1alpha1.PackageRevision{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "PackageRevision",
