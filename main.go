@@ -31,10 +31,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	automationv1alpha1 "github.com/nephio-project/nephio/apis/automation/v1alpha1"
-	infrav1alpha1 "github.com/nephio-project/nephio/apis/infra/v1alpha1"
-	automationcontrollers "github.com/nephio-project/nephio/controllers/automation"
-	"github.com/nephio-project/nephio/pkg/porch"
+	automationv1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/automation/v1alpha1"
+	infrav1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/infra/v1alpha1"
+	automationcontrollers "github.com/nephio-project/nephio-controller-poc/controllers/automation"
+	"github.com/nephio-project/nephio-controller-poc/pkg/porch"
 	//+kubebuilder:scaffold:imports
 )
 

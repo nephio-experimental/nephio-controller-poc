@@ -17,7 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
-	automationv1alpha1 "github.com/nephio-project/nephio/apis/automation/v1alpha1"
+	automationv1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/automation/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

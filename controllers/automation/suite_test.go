@@ -31,7 +31,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	automationv1alpha1 "github.com/nephio-project/nephio/apis/automation/v1alpha1"
+	automationv1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/automation/v1alpha1"
 	//+kubebuilder:scaffold:imports
 )
 
