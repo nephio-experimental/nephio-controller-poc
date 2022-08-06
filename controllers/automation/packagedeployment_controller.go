@@ -26,17 +26,29 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/go-logr/logr"
+
 	automationv1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/automation/v1alpha1"
 	infrav1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/infra/v1alpha1"
 
 	porchv1alpha1 "github.com/GoogleContainerTools/kpt/porch/api/porch/v1alpha1"
 )
 
+// namespace->repo->package->revision
+type PackageRevisionMapByRev map[string]*porchv1alpha1.PackageRevision
+type PackageRevisionMapByPkg map[string]PackageRevisionMapByRev
+type PackageRevisionMapByRepo map[string]PackageRevisionMapByPkg
+type PackageRevisionMapByNS map[string]PackageRevisionMapByRepo
+
 // PackageDeploymentReconciler reconciles a PackageDeployment object
 type PackageDeploymentReconciler struct {
 	client.Client
 	Scheme      *runtime.Scheme
 	PorchClient client.Client
+
+	// NOTE: this needs to be updated with every request, it sucks
+	packageRevs PackageRevisionMapByNS
+	l           logr.Logger
 }
 
 //+kubebuilder:rbac:groups=automation.nephio.org,resources=packagedeployments,verbs=get;list;watch;create;update;patch;delete
@@ -53,66 +65,37 @@ type PackageDeploymentReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.12.2/pkg/reconcile
 func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	l := log.FromContext(ctx)
-
-	l.Info("reconcile", "req", req)
-
-	// Load the PackageDeploymen
-	var pd automationv1alpha1.PackageDeployment
-	if err := r.Get(ctx, req.NamespacedName, &pd); err != nil {
-		l.Error(err, "unable to fetch PackageDeployment")
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
+	pd, err := r.startRequest(ctx, req)
 
 	// Find the clusters matching the selector
 	selector, err := metav1.LabelSelectorAsSelector(pd.Spec.Selector)
 	if err != nil {
-		l.Error(err, "could not create selector", "pd", pd)
+		r.l.Error(err, "could not create selector", "pd", pd)
 		return ctrl.Result{}, err
 	}
 
 	var clusterList infrav1alpha1.ClusterList
 	if err := r.List(ctx, &clusterList, client.MatchingLabelsSelector{Selector: selector}); err != nil {
-		l.Error(err, "could not list clusters", "selector", selector)
+		r.l.Error(err, "could not list clusters", "selector", selector)
 		return ctrl.Result{}, err
 	}
 
 	if len(clusterList.Items) == 0 {
-		l.Info("No clusters for PackageDeployment", "name", req.NamespacedName)
+		r.l.Info("No clusters for PackageDeployment", "name", req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
-	l.Info("Found clusters for PackageDeployment", "name", req.NamespacedName, "clusters", len(clusterList.Items))
-
-	// Try to locate the package
-	// Brute force search :(
-	var prList porchv1alpha1.PackageRevisionList
-	if err := r.PorchClient.List(ctx, &prList); err != nil {
-		l.Error(err, "could not list package revisions")
-		return ctrl.Result{}, err
-	}
-
-	l.Info("Found packages", "count", len(prList.Items))
+	r.l.Info("Found clusters for PackageDeployment", "name", req.NamespacedName, "clusters", len(clusterList.Items))
 
 	packageNS := pd.Namespace
 	if pd.Spec.PackageRef.Namespace != "" {
 		packageNS = pd.Spec.PackageRef.Namespace
 	}
 
-	var sourcePR *porchv1alpha1.PackageRevision
-	for _, pr := range prList.Items {
-		l.Info("Found", "Package", pr.Name)
-		if pr.Namespace == packageNS &&
-			pr.Spec.PackageName == pd.Spec.PackageRef.PackageName &&
-			pr.Spec.Revision == pd.Spec.PackageRef.Revision &&
-			pr.Spec.RepositoryName == pd.Spec.PackageRef.RepositoryName {
-			sourcePR = &pr
-			break
-		}
-	}
+	sourcePR := r.findPackageRevision(packageNS, pd.Spec.PackageRef.RepositoryName, pd.Spec.PackageRef.PackageName, pd.Spec.PackageRef.Revision)
 
 	if sourcePR == nil {
-		l.Info("Could not find matching package revision")
+		r.l.Info("Could not find matching package revision")
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 
@@ -140,9 +123,9 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		// Find the repo associated with the cluster
 
 		// Clone the package from upstream to the repo
-		err = r.clonePackageRevision(ctx, &pd, &c, sourcePR)
+		err = r.clonePackageRevision(ctx, pd, &c, sourcePR)
 		if err != nil {
-			l.Error(err, "could not clone package")
+			r.l.Error(err, "could not clone package")
 			return ctrl.Result{}, err
 		}
 		// Load the contents of the new variant
@@ -156,6 +139,77 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *PackageDeploymentReconciler) startRequest(ctx context.Context, req ctrl.Request) (*automationv1alpha1.PackageDeployment, error) {
+	r.l = log.FromContext(ctx)
+	r.l.Info("reconcile", "req", req)
+
+	err := r.loadPackageRevisions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load the PackageDeploymen
+	var pd automationv1alpha1.PackageDeployment
+	if err := r.Get(ctx, req.NamespacedName, &pd); err != nil {
+		r.l.Error(err, "unable to fetch PackageDeployment")
+		return nil, client.IgnoreNotFound(err)
+	}
+
+	return &pd, nil
+}
+
+func (r *PackageDeploymentReconciler) loadPackageRevisions(ctx context.Context) error {
+
+	// Try to locate the package
+	// Brute force search :(
+	var prList porchv1alpha1.PackageRevisionList
+	if err := r.PorchClient.List(ctx, &prList); err != nil {
+		r.l.Error(err, "could not list package revisions")
+		return err
+	}
+
+	r.l.Info("Found packages", "count", len(prList.Items))
+
+	packageRevs := make(PackageRevisionMapByNS)
+	for _, pr := range prList.Items {
+		r.l.Info("Found", "Package", pr.Name)
+		if _, ok := packageRevs[pr.Namespace]; !ok {
+			packageRevs[pr.Namespace] = make(PackageRevisionMapByRepo)
+		}
+		m := packageRevs[pr.Namespace]
+		if _, ok := m[pr.Spec.RepositoryName]; !ok {
+			m[pr.Spec.RepositoryName] = make(PackageRevisionMapByPkg)
+		}
+		if _, ok := m[pr.Spec.RepositoryName][pr.Spec.PackageName]; !ok {
+			m[pr.Spec.RepositoryName][pr.Spec.PackageName] = make(PackageRevisionMapByRev)
+		}
+		m[pr.Spec.RepositoryName][pr.Spec.PackageName][pr.Spec.Revision] = &pr
+	}
+
+	r.packageRevs = packageRevs
+	return nil
+}
+
+func (r *PackageDeploymentReconciler) findPackageRevision(ns, repo, pkg, rev string) *porchv1alpha1.PackageRevision {
+	if r.packageRevs == nil {
+		return nil
+	}
+
+	if _, ok := r.packageRevs[ns]; !ok {
+		return nil
+	}
+	if _, ok := r.packageRevs[ns][repo]; !ok {
+		return nil
+	}
+	if _, ok := r.packageRevs[ns][repo][pkg]; !ok {
+		return nil
+	}
+	if _, ok := r.packageRevs[ns][repo][pkg][rev]; !ok {
+		return nil
+	}
+	return r.packageRevs[ns][repo][pkg][rev]
 }
 
 func (r *PackageDeploymentReconciler) clonePackageRevision(ctx context.Context,
