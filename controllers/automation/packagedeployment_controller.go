@@ -99,6 +99,8 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 
+	r.l.Info("Found matching package revision", "pr", sourcePR)
+
 	// WARNING WARNING WARNING
 	// NOTE: this is bad, it's only looking at "first run" - this is PROOF OF CONCEPT
 	// code, not production code. What we MUST do in a real controller is:
@@ -172,7 +174,7 @@ func (r *PackageDeploymentReconciler) loadPackageRevisions(ctx context.Context) 
 
 	packageRevs := make(PackageRevisionMapByNS)
 	for _, pr := range prList.Items {
-		r.l.Info("Found", "Package", pr.Name)
+		r.l.Info("Found", "PackageRevision", pr)
 		if _, ok := packageRevs[pr.Namespace]; !ok {
 			packageRevs[pr.Namespace] = make(PackageRevisionMapByRepo)
 		}
@@ -183,7 +185,8 @@ func (r *PackageDeploymentReconciler) loadPackageRevisions(ctx context.Context) 
 		if _, ok := m[pr.Spec.RepositoryName][pr.Spec.PackageName]; !ok {
 			m[pr.Spec.RepositoryName][pr.Spec.PackageName] = make(PackageRevisionMapByRev)
 		}
-		m[pr.Spec.RepositoryName][pr.Spec.PackageName][pr.Spec.Revision] = &pr
+		newPR := pr
+		m[pr.Spec.RepositoryName][pr.Spec.PackageName][pr.Spec.Revision] = &newPR
 	}
 
 	r.packageRevs = packageRevs
