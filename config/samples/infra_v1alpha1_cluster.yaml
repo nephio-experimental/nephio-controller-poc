@@ -30,6 +30,6 @@ metadata:
     nephio.org/region: us-central1
     nephio.org/site-type: aggregation
     nephio.org/site: edge-02
-scaleProfileName: small-fixed-site
+scaleProfileName: medium-fixed-site
 repositoryRef:
   name: test-deploy-edge-02

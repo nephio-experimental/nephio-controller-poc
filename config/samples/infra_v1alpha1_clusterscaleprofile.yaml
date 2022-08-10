@@ -2,38 +2,43 @@ apiVersion: infra.nephio.org/v1alpha1
 kind: ClusterScaleProfile
 metadata:
   name: small-fixed-site
-autoscaling: false
-nodeMax: 6
-siteDensity: low
+spec:
+  autoscaling: false
+  nodeMax: 6
+  siteDensity: low
 ---
 apiVersion: infra.nephio.org/v1alpha1
 kind: ClusterScaleProfile
 metadata:
   name: medium-fixed-site
-autoscaling: false
-nodeMax: 12
-siteDensity: medium
+spec:
+  autoscaling: false
+  nodeMax: 12
+  siteDensity: medium
 ---
 apiVersion: infra.nephio.org/v1alpha1
 kind: ClusterScaleProfile
 metadata:
   name: medium-autoscaling-site
-autoscaling: true
-nodeMax: 24
-siteDensity: medium
+spec:
+  autoscaling: true
+  nodeMax: 24
+  siteDensity: medium
 ---
 apiVersion: infra.nephio.org/v1alpha1
 kind: ClusterScaleProfile
 metadata:
   name: large-fixed-site
-autoscaling: false
-nodeMax: 600
-siteDensity: high
+spec:
+  autoscaling: false
+  nodeMax: 600
+  siteDensity: high
 ---
 apiVersion: infra.nephio.org/v1alpha1
 kind: ClusterScaleProfile
 metadata:
   name: large-autoscaling-site
-autoscaling: true
-nodeMax: 2400
-siteDensity: high
+spec:
+  autoscaling: true
+  nodeMax: 2400
+  siteDensity: high

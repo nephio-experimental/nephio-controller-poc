@@ -17,11 +17,14 @@ limitations under the License.
 package automation
 
 import (
+	"bytes"
 	"context"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer/json"
+
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -32,6 +35,9 @@ import (
 	infrav1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/infra/v1alpha1"
 
 	porchv1alpha1 "github.com/GoogleContainerTools/kpt/porch/api/porch/v1alpha1"
+	"github.com/nephio-project/nephio-controller-poc/pkg/porch"
+
+	"sigs.k8s.io/kustomize/kyaml/yaml"
 )
 
 // namespace->repo->package->revision
@@ -46,9 +52,10 @@ type PackageDeploymentReconciler struct {
 	Scheme      *runtime.Scheme
 	PorchClient client.Client
 
-	// NOTE: this needs to be updated with every request, it sucks
+	// NOTE: this should be updated with every request, it sucks
 	packageRevs PackageRevisionMapByNS
 	l           logr.Logger
+	s           *json.Serializer
 }
 
 //+kubebuilder:rbac:groups=automation.nephio.org,resources=packagedeployments,verbs=get;list;watch;create;update;patch;delete
@@ -121,24 +128,145 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// ClusterScaleProfile, we will overwrite the package version with the
 	// associated cluster version.
 	//
+	//
+	targetNS := "default"
+	if pd.Spec.Namespace != nil {
+		targetNS = *pd.Spec.Namespace
+	}
+
 	for _, c := range clusterList.Items {
 		// Clone or update the package from upstream to the repo
-		err = r.ensurePackageRevision(ctx, pd, &c, sourcePR)
+		newPR, err := r.ensurePackageRevision(ctx, pd, &c, sourcePR)
 		if err != nil {
-			r.l.Error(err, "could not clone package")
-			return ctrl.Result{}, err
+			r.l.Error(err, "could not clone package", "pd", pd, "cluster", c)
+			continue
 		}
-		// Load the contents of the new variant
-		// Add a Namespace if it does not already exist in the package
-		// Add set-namespace function if it doesn't already exist
-		// If a ClusterScaleProfile CR exists, and one exists for the
-		// associated cluster, then copy the cluster version to the package
-		// Save the package
+
+		if err := r.applyPackageMutations(ctx, targetNS, &c, newPR); err != nil {
+			r.l.Error(err, "could not apply package mutations")
+			continue
+		}
+
 		// Propose the package
-		//
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *PackageDeploymentReconciler) applyPackageMutations(ctx context.Context,
+	targetNS string,
+	c *infrav1alpha1.Cluster,
+	newPR *porchv1alpha1.PackageRevision) error {
+
+	// Load the contents of the new variant
+	resources, err := r.loadResourceList(ctx, newPR)
+	if err != nil {
+		r.l.Error(err, "could not load resources", "newPR", newPR, "cluster", c)
+		return err
+	}
+
+	pkgBuf, err := porch.ResourcesToPackageBuffer(resources.Spec.Resources)
+	if err != nil {
+		r.l.Error(err, "could not parse resources", "newPR", newPR, "cluster", c)
+		return err
+	}
+
+	r.l.Info("parsed resources", "resources", pkgBuf)
+
+	// search for NS and ScaleProfile resources
+	nsIdx := -1
+	scaleProfileIdx := -1
+	for i, n := range pkgBuf.Nodes {
+		if n.GetApiVersion() == "v1" && n.GetKind() == "Namespace" {
+			nsIdx = i
+			continue
+		}
+		if n.GetApiVersion() == "infra.nephio.org/v1alpha1" && n.GetKind() == "ClusterScaleProfile" {
+			scaleProfileIdx = i
+			continue
+		}
+	}
+
+	// TODO: Add set-namespace function if it doesn't already exist
+	// Add a Namespace if it does not already exist in the package
+	if nsIdx == -1 {
+		r.l.Info("No namespace found in package, adding one")
+
+		nsNode, err := yaml.Parse(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: ` + targetNS)
+		if err != nil {
+			r.l.Error(err, "could not parse namespace yaml", "targetNS", targetNS)
+			return err
+		}
+		pkgBuf.Nodes = append(pkgBuf.Nodes, nsNode)
+	}
+
+	// If a ClusterScaleProfile CR exists, and one exists for the
+	// associated cluster, then copy the cluster version to the package
+	if scaleProfileIdx > -1 {
+		clusterScaleProfile, err := r.findClusterScaleProfile(ctx, c)
+		if err != nil {
+			r.l.Error(err, "error finding cluster scale profile", "cluster", c)
+			return err
+		}
+		if clusterScaleProfile != nil {
+
+			// convert it to a *RNode
+			var spYamlBuf bytes.Buffer
+			if err := r.s.Encode(clusterScaleProfile, &spYamlBuf); err != nil {
+				r.l.Error(err, "could not write clusterScaleProfile as yaml", "clusterScaleProfile", clusterScaleProfile)
+				return err
+			}
+
+			spNode, err := yaml.Parse(spYamlBuf.String())
+			if err != nil {
+				r.l.Error(err, "could not parse scale profile yaml", "spYaml", spYamlBuf.String())
+				return err
+			}
+
+			// set the spec on the one in the package to match our spec
+			field := spNode.Field("spec")
+			pkgBuf.Nodes[scaleProfileIdx].SetMapField(field.Value, "spec")
+		}
+	}
+
+	r.l.Info("updated package RNodes", "RNodes", pkgBuf.Nodes)
+
+	// Save the package by creating an updated PackageRevisionResources
+	newResources, err := porch.CreateUpdatedResources(resources.Spec.Resources, pkgBuf)
+	if err != nil {
+		r.l.Error(err, "could create new resource map")
+		return err
+	}
+
+	resources.Spec.Resources = newResources
+	if err := r.PorchClient.Update(ctx, resources); err != nil {
+		r.l.Error(err, "could not save updated resources")
+		return err
+	}
+
+	r.l.Info("updated PackageRevisionResources", "resources", resources)
+
+	return nil
+}
+
+func (r *PackageDeploymentReconciler) findClusterScaleProfile(ctx context.Context, c *infrav1alpha1.Cluster) (*infrav1alpha1.ClusterScaleProfile, error) {
+	if c.ScaleProfileName == nil {
+		return nil, nil
+	}
+
+	var scaleProfile infrav1alpha1.ClusterScaleProfile
+	if err := r.Client.Get(ctx, client.ObjectKey{
+		Namespace: c.Namespace,
+		Name:      *c.ScaleProfileName,
+	}, &scaleProfile); err != nil {
+		r.l.Error(err, "unable to fetch ClusterScaleProfile", "cluster", c)
+		return nil, err
+	}
+
+	return &scaleProfile, nil
 }
 
 func (r *PackageDeploymentReconciler) startRequest(ctx context.Context, req ctrl.Request) (*automationv1alpha1.PackageDeployment, error) {
@@ -150,13 +278,14 @@ func (r *PackageDeploymentReconciler) startRequest(ctx context.Context, req ctrl
 		return nil, err
 	}
 
-	// Load the PackageDeploymen
+	// Load the PackageDeployment
 	var pd automationv1alpha1.PackageDeployment
 	if err := r.Get(ctx, req.NamespacedName, &pd); err != nil {
 		r.l.Error(err, "unable to fetch PackageDeployment")
 		return nil, client.IgnoreNotFound(err)
 	}
 
+	r.s = json.NewSerializerWithOptions(json.DefaultMetaFactory, nil, nil, json.SerializerOptions{Yaml: true})
 	return &pd, nil
 }
 
@@ -216,7 +345,7 @@ func (r *PackageDeploymentReconciler) findPackageRevision(ns, repo, pkg, rev str
 func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 	pd *automationv1alpha1.PackageDeployment,
 	c *infrav1alpha1.Cluster,
-	sourcePR *porchv1alpha1.PackageRevision) error {
+	sourcePR *porchv1alpha1.PackageRevision) (*porchv1alpha1.PackageRevision, error) {
 
 	// What we SHOULD do in here is:
 	//   - Check if the target repo has the package already
@@ -238,6 +367,14 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 		ns = pd.Namespace
 	}
 
+	// Hack: our packages set the NS to the package name using
+	// set-namespace, so let's name the package in expectation of that
+	// Need to figure out the right way to do this
+	newPackageName := pd.Name
+	if pd.Spec.Namespace != nil {
+		newPackageName = *pd.Spec.Namespace
+	}
+
 	// We SHOULD be adding an ownerRef with the controller and PD info,
 	// This would be to facilitate pruning. I am not sure if the aggregated
 	// API server in Porch supports this; if not we need to add it.
@@ -251,8 +388,10 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 			Namespace: ns,
 		},
 		Spec: porchv1alpha1.PackageRevisionSpec{
-			PackageName:    sourcePR.Spec.PackageName,
-			Revision:       sourcePR.Spec.Revision,
+			//PackageName:    sourcePR.Spec.PackageName,
+			//Revision:       sourcePR.Spec.Revision,
+			PackageName:    newPackageName,
+			Revision:       "v1",
 			RepositoryName: c.RepositoryRef.Name,
 			Tasks: []porchv1alpha1.Task{
 				{
@@ -268,7 +407,25 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 			},
 		},
 	}
-	return r.PorchClient.Create(ctx, newPR)
+	err := r.PorchClient.Create(ctx, newPR)
+	if err != nil {
+		return nil, err
+	}
+
+	r.l.Info("Created PackageRevision", "newPR", newPR)
+	return newPR, nil
+}
+
+func (r *PackageDeploymentReconciler) loadResourceList(ctx context.Context, pr *porchv1alpha1.PackageRevision) (*porchv1alpha1.PackageRevisionResources, error) {
+	var resources porchv1alpha1.PackageRevisionResources
+	if err := r.PorchClient.Get(ctx, client.ObjectKey{
+		Namespace: pr.Namespace,
+		Name:      pr.Name,
+	}, &resources); err != nil {
+		return nil, err
+	}
+
+	return &resources, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

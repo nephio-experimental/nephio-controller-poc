@@ -10,5 +10,5 @@ spec:
   namespace: caching-dns
   packageRef:
     repository: nephio-packages
-    packageName: coredns-caching
+    packageName: coredns-caching-scaled
     revision: v1
