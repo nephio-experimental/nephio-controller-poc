@@ -226,8 +226,9 @@ metadata:
 				return err
 			}
 
-			// replace the node
-			pkgBuf.Nodes[scaleProfileIdx] = spNode
+			// set the spec on the one in the package to match our spec
+			field := spNode.Field("spec")
+			pkgBuf.Nodes[scaleProfileIdx].SetMapField(field.Value, "spec")
 		}
 	}
 
@@ -366,6 +367,14 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 		ns = pd.Namespace
 	}
 
+	// Hack: our packages set the NS to the package name using
+	// set-namespace, so let's name the package in expectation of that
+	// Need to figure out the right way to do this
+	newPackageName := pd.Name
+	if pd.Spec.Namespace != nil {
+		newPackageName = *pd.Spec.Namespace
+	}
+
 	// We SHOULD be adding an ownerRef with the controller and PD info,
 	// This would be to facilitate pruning. I am not sure if the aggregated
 	// API server in Porch supports this; if not we need to add it.
@@ -379,8 +388,10 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 			Namespace: ns,
 		},
 		Spec: porchv1alpha1.PackageRevisionSpec{
-			PackageName:    sourcePR.Spec.PackageName,
-			Revision:       sourcePR.Spec.Revision,
+			//PackageName:    sourcePR.Spec.PackageName,
+			//Revision:       sourcePR.Spec.Revision,
+			PackageName:    newPackageName,
+			Revision:       "v1",
 			RepositoryName: c.RepositoryRef.Name,
 			Tasks: []porchv1alpha1.Task{
 				{

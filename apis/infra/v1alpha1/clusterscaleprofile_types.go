@@ -27,6 +27,10 @@ type ClusterScaleProfile struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	ClusterScaleProfileSpec `json:"spec,omitempty"`
+}
+
+type ClusterScaleProfileSpec struct {
 	// Autoscaling indicates whether or not this cluster supports cluster
 	// autoscaler.
 	Autoscaling *bool `json:"autoscaling,omitempty"`
