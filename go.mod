@@ -3,7 +3,7 @@ module github.com/nephio-project/nephio-controller-poc
 go 1.18
 
 require (
-	github.com/GoogleContainerTools/kpt/porch/api v0.0.0-20220808214113-655377b65d42
+	github.com/GoogleContainerTools/kpt/porch/api v0.0.0-20221101221205-3f3fbb8b507d
 	github.com/go-logr/logr v1.2.0
 	github.com/onsi/ginkgo v1.16.5
 	github.com/onsi/gomega v1.18.1

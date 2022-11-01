@@ -28,11 +28,6 @@ type Cluster struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// ScaleProfileName contains the name of a ClusterScaleProfile in the same namespace,
-	// which provides cluster scaling characteristics
-	// +optional
-	ScaleProfileName *string `json:"scaleProfileName,omitempty"`
-
 	// RepositoryRef identifies the deployment repository for this cluster
 	RepositoryRef automationv1alpha1.RepositoryReference `json:"repositoryRef"`
 }
