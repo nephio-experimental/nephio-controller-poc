@@ -30,11 +30,6 @@ func (in *Cluster) DeepCopyInto(out *Cluster) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
-	if in.ScaleProfileName != nil {
-		in, out := &in.ScaleProfileName, &out.ScaleProfileName
-		*out = new(string)
-		**out = **in
-	}
 	out.RepositoryRef = in.RepositoryRef
 }
 

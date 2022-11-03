@@ -19,15 +19,21 @@ package automation
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"sigs.k8s.io/kustomize/kyaml/resid"
+	"sigs.k8s.io/kustomize/kyaml/yaml"
 
 	"github.com/go-logr/logr"
 
@@ -36,8 +42,6 @@ import (
 
 	porchv1alpha1 "github.com/GoogleContainerTools/kpt/porch/api/porch/v1alpha1"
 	"github.com/nephio-project/nephio-controller-poc/pkg/porch"
-
-	"sigs.k8s.io/kustomize/kyaml/yaml"
 )
 
 // namespace->repo->package->revision
@@ -45,6 +49,8 @@ type PackageRevisionMapByRev map[string]*porchv1alpha1.PackageRevision
 type PackageRevisionMapByPkg map[string]PackageRevisionMapByRev
 type PackageRevisionMapByRepo map[string]PackageRevisionMapByPkg
 type PackageRevisionMapByNS map[string]PackageRevisionMapByRepo
+
+var wsNum = 0
 
 // PackageDeploymentReconciler reconciles a PackageDeployment object
 type PackageDeploymentReconciler struct {
@@ -73,6 +79,7 @@ type PackageDeploymentReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.12.2/pkg/reconcile
 func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	pd, err := r.startRequest(ctx, req)
+	r.l.Info("reconciling")
 
 	// Find the clusters matching the selector
 	selector, err := metav1.LabelSelectorAsSelector(pd.Spec.Selector)
@@ -142,6 +149,10 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			continue
 		}
 
+		if newPR == nil {
+			continue
+		}
+
 		if err := r.applyPackageMutations(ctx, targetNS, &c, newPR); err != nil {
 			r.l.Error(err, "could not apply package mutations")
 			continue
@@ -173,17 +184,28 @@ func (r *PackageDeploymentReconciler) applyPackageMutations(ctx context.Context,
 
 	r.l.Info("parsed resources", "resources", pkgBuf)
 
-	// search for NS and ScaleProfile resources
 	nsIdx := -1
-	scaleProfileIdx := -1
+	bindingResources := make(map[yaml.ResourceIdentifier]*yaml.RNode)
 	for i, n := range pkgBuf.Nodes {
+		// search for namespace
 		if n.GetApiVersion() == "v1" && n.GetKind() == "Namespace" {
 			nsIdx = i
-			continue
 		}
-		if n.GetApiVersion() == "infra.nephio.org/v1alpha1" && n.GetKind() == "ClusterScaleProfile" {
-			scaleProfileIdx = i
-			continue
+
+		// search for binding resources
+		annotations := n.GetAnnotations()
+		if value, found := annotations["config.kubernetes.io/local-config"]; found && value == "binding" {
+			id := yaml.ResourceIdentifier{
+				TypeMeta: yaml.TypeMeta{
+					APIVersion: n.GetApiVersion(),
+					Kind:       n.GetKind(),
+				},
+				NameMeta: yaml.NameMeta{
+					Name:      n.GetName(),
+					Namespace: n.GetNamespace(),
+				},
+			}
+			bindingResources[id] = n
 		}
 	}
 
@@ -203,20 +225,22 @@ metadata:
 		pkgBuf.Nodes = append(pkgBuf.Nodes, nsNode)
 	}
 
-	// If a ClusterScaleProfile CR exists, and one exists for the
-	// associated cluster, then copy the cluster version to the package
-	if scaleProfileIdx > -1 {
-		clusterScaleProfile, err := r.findClusterScaleProfile(ctx, c)
-		if err != nil {
-			r.l.Error(err, "error finding cluster scale profile", "cluster", c)
-			return err
-		}
-		if clusterScaleProfile != nil {
+	// If a binding resource exists in the package, and one exists
+	// that matches the name of the associated cluster, overwrite the
+	// resource in the package with the cluster resource
 
+	for id, pkgResource := range bindingResources {
+		clusterResource, err := r.findClusterObject(ctx, c, id)
+		if err != nil {
+			r.l.Info(fmt.Sprintf("error finding cluster resource: %s", err.Error()), "cluster", c)
+			continue
+		}
+		if clusterResource != nil {
 			// convert it to a *RNode
 			var spYamlBuf bytes.Buffer
-			if err := r.s.Encode(clusterScaleProfile, &spYamlBuf); err != nil {
-				r.l.Error(err, "could not write clusterScaleProfile as yaml", "clusterScaleProfile", clusterScaleProfile)
+			if err := r.s.Encode(clusterResource, &spYamlBuf); err != nil {
+				r.l.Error(err, fmt.Sprintf("could not write resource with apiVersion %q and kind %q as yaml",
+					id.APIVersion, id.Kind), "clusterResource", clusterResource)
 				return err
 			}
 
@@ -228,7 +252,11 @@ metadata:
 
 			// set the spec on the one in the package to match our spec
 			field := spNode.Field("spec")
-			pkgBuf.Nodes[scaleProfileIdx].SetMapField(field.Value, "spec")
+			if err := pkgResource.SetMapField(field.Value, "spec"); err != nil {
+				str, _ := spNode.String()
+				r.l.Error(err, "could not set object spec", "spNode", str)
+				return err
+			}
 		}
 	}
 
@@ -252,21 +280,26 @@ metadata:
 	return nil
 }
 
-func (r *PackageDeploymentReconciler) findClusterScaleProfile(ctx context.Context, c *infrav1alpha1.Cluster) (*infrav1alpha1.ClusterScaleProfile, error) {
-	if c.ScaleProfileName == nil {
-		return nil, nil
-	}
+func (r *PackageDeploymentReconciler) findClusterObject(ctx context.Context, c *infrav1alpha1.Cluster,
+	id yaml.ResourceIdentifier) (*unstructured.Unstructured, error) {
 
-	var scaleProfile infrav1alpha1.ClusterScaleProfile
+	u := &unstructured.Unstructured{}
+	group, version := resid.ParseGroupVersion(id.APIVersion)
+	u.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   group,
+		Kind:    id.Kind,
+		Version: version,
+	})
+
 	if err := r.Client.Get(ctx, client.ObjectKey{
 		Namespace: c.Namespace,
-		Name:      *c.ScaleProfileName,
-	}, &scaleProfile); err != nil {
-		r.l.Error(err, "unable to fetch ClusterScaleProfile", "cluster", c)
+		Name:      c.Name,
+	}, u); err != nil {
+		r.l.Error(err, "unable to fetch object from cluster", "cluster", c)
 		return nil, err
 	}
 
-	return &scaleProfile, nil
+	return u, nil
 }
 
 func (r *PackageDeploymentReconciler) startRequest(ctx context.Context, req ctrl.Request) (*automationv1alpha1.PackageDeployment, error) {
@@ -375,6 +408,17 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 		newPackageName = *pd.Spec.Namespace
 	}
 
+	// check if the package already exists downstream
+	if byRepo, ok := r.packageRevs[ns]; ok {
+		if byPkg, ok := byRepo[c.RepositoryRef.Name]; ok {
+			if _, ok := byPkg[newPackageName]; ok {
+				// downstream package already exists
+				// TODO: Update the downstream package if needed.
+				return nil, nil
+			}
+		}
+	}
+
 	// We SHOULD be adding an ownerRef with the controller and PD info,
 	// This would be to facilitate pruning. I am not sure if the aggregated
 	// API server in Porch supports this; if not we need to add it.
@@ -391,7 +435,7 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 			//PackageName:    sourcePR.Spec.PackageName,
 			//Revision:       sourcePR.Spec.Revision,
 			PackageName:    newPackageName,
-			Revision:       "v1",
+			WorkspaceName:  porchv1alpha1.WorkspaceName(fmt.Sprintf("ws-%d", wsNum)),
 			RepositoryName: c.RepositoryRef.Name,
 			Tasks: []porchv1alpha1.Task{
 				{
@@ -411,6 +455,8 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+
+	wsNum++
 
 	r.l.Info("Created PackageRevision", "newPR", newPR)
 	return newPR, nil

@@ -1,7 +1,7 @@
 apiVersion: infra.nephio.org/v1alpha1
 kind: ClusterScaleProfile
 metadata:
-  name: small-fixed-site
+  name: nephio-edge-01
 spec:
   autoscaling: false
   nodeMax: 6
@@ -10,7 +10,7 @@ spec:
 apiVersion: infra.nephio.org/v1alpha1
 kind: ClusterScaleProfile
 metadata:
-  name: medium-fixed-site
+  name: nephio-edge-02
 spec:
   autoscaling: false
   nodeMax: 12
@@ -37,7 +37,7 @@ spec:
 apiVersion: infra.nephio.org/v1alpha1
 kind: ClusterScaleProfile
 metadata:
-  name: large-autoscaling-site
+  name: nephio-regional-01
 spec:
   autoscaling: true
   nodeMax: 2400

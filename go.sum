@@ -57,6 +57,8 @@ github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
 github.com/GoogleContainerTools/kpt/porch/api v0.0.0-20220808214113-655377b65d42 h1:VI58jVGAL42V+39R+axygy5d40ByEcV1xiqu0wK2+kI=
 github.com/GoogleContainerTools/kpt/porch/api v0.0.0-20220808214113-655377b65d42/go.mod h1:51Vk7QZ+XUzHCvQBi7t9tiWqTXvy6T13cv/inUXJJ0s=
+github.com/GoogleContainerTools/kpt/porch/api v0.0.0-20221101221205-3f3fbb8b507d h1:ggKkI4gfKE/hg+ZjUJtsNo3WKkMmmfDEO1vR1sEKz2M=
+github.com/GoogleContainerTools/kpt/porch/api v0.0.0-20221101221205-3f3fbb8b507d/go.mod h1:ASrhnLAL4ahTuiUJyepqcpVRXIoRMJyDs8/eSxwhgZM=
 github.com/NYTimes/gziphandler v0.0.0-20170623195520-56545f4a5d46/go.mod h1:3wb06e3pkSAbeQ52E9H9iFoQsEEwGN64994WTCIhntQ=
 github.com/NYTimes/gziphandler v1.1.1/go.mod h1:n/CVRwUEOgIxrgPvAQhUUr9oeUtvrhMomdKFjzJNB0c=
 github.com/OneOfOne/xxhash v1.2.2/go.mod h1:HSdplMjZKSmBqAxg5vPj2TmRDmfkzw+cTzAElWljhcU=
