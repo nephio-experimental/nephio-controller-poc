@@ -47,10 +47,6 @@ spec:
             required:
             - name
             type: object
-          scaleProfileName:
-            description: ScaleProfileName contains the name of a ClusterScaleProfile
-              in the same namespace, which provides cluster scaling characteristics
-            type: string
         required:
         - repositoryRef
         type: object

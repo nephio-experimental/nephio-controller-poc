@@ -232,15 +232,15 @@ metadata:
 	for id, pkgResource := range bindingResources {
 		clusterResource, err := r.findClusterObject(ctx, c, id)
 		if err != nil {
-			r.l.Error(err, "error finding cluster resource", "cluster", c)
-			return err
+			r.l.Info(fmt.Sprintf("error finding cluster resource: %s", err.Error()), "cluster", c)
+			continue
 		}
 		if clusterResource != nil {
-
 			// convert it to a *RNode
 			var spYamlBuf bytes.Buffer
 			if err := r.s.Encode(clusterResource, &spYamlBuf); err != nil {
-				r.l.Error(err, "could not write clusterScaleProfile as yaml", "clusterResource", clusterResource)
+				r.l.Error(err, fmt.Sprintf("could not write resource with apiVersion %q and kind %q as yaml",
+					id.APIVersion, id.Kind), "clusterResource", clusterResource)
 				return err
 			}
 

@@ -6,7 +6,6 @@ metadata:
     nephio.org/region: us-central1
     nephio.org/site-type: regional
     nephio.org/site: us-central1
-scaleProfileName: large-autoscaling-site
 repositoryRef:
   name: test-deploy-regional-01
 ---
@@ -18,7 +17,6 @@ metadata:
     nephio.org/region: us-central1
     nephio.org/site-type: aggregation
     nephio.org/site: edge-01
-scaleProfileName: small-fixed-site
 repositoryRef:
   name: test-deploy-edge-01
 ---
@@ -30,6 +28,5 @@ metadata:
     nephio.org/region: us-central1
     nephio.org/site-type: aggregation
     nephio.org/site: edge-02
-scaleProfileName: medium-fixed-site
 repositoryRef:
   name: test-deploy-edge-02
