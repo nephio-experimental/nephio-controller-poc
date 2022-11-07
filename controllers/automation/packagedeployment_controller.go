@@ -196,7 +196,7 @@ func (r *PackageDeploymentReconciler) applyPackageMutations(ctx context.Context,
 
 		// search for binding resources
 		annotations := n.GetAnnotations()
-		if value, found := annotations["config.kubernetes.io/local-config"]; found && value == "binding" {
+		if value, found := annotations["automation.nephio.org/config-injection"]; found && value == "True" {
 			id := yaml.ResourceIdentifier{
 				TypeMeta: yaml.TypeMeta{
 					APIVersion: n.GetApiVersion(),
