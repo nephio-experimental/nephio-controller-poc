@@ -20,7 +20,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
+
+	configapi "github.com/GoogleContainerTools/kpt/porch/api/porchconfig/v1alpha1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -36,6 +40,7 @@ import (
 	"sigs.k8s.io/kustomize/kyaml/yaml"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/mod/semver"
 
 	automationv1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/automation/v1alpha1"
 	infrav1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/infra/v1alpha1"
@@ -45,12 +50,10 @@ import (
 )
 
 // namespace->repo->package->revision
-type PackageRevisionMapByRev map[string]*porchv1alpha1.PackageRevision
+type PackageRevisionMapByRev map[string][]*porchv1alpha1.PackageRevision
 type PackageRevisionMapByPkg map[string]PackageRevisionMapByRev
 type PackageRevisionMapByRepo map[string]PackageRevisionMapByPkg
 type PackageRevisionMapByNS map[string]PackageRevisionMapByRepo
-
-var wsNum = 0
 
 // PackageDeploymentReconciler reconciles a PackageDeployment object
 type PackageDeploymentReconciler struct {
@@ -79,7 +82,6 @@ type PackageDeploymentReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.12.2/pkg/reconcile
 func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	pd, err := r.startRequest(ctx, req)
-	r.l.Info("reconciling")
 
 	// Find the clusters matching the selector
 	selector, err := metav1.LabelSelectorAsSelector(pd.Spec.Selector)
@@ -348,7 +350,9 @@ func (r *PackageDeploymentReconciler) loadPackageRevisions(ctx context.Context) 
 			m[pr.Spec.RepositoryName][pr.Spec.PackageName] = make(PackageRevisionMapByRev)
 		}
 		newPR := pr
-		m[pr.Spec.RepositoryName][pr.Spec.PackageName][pr.Spec.Revision] = &newPR
+		list := m[pr.Spec.RepositoryName][pr.Spec.PackageName][pr.Spec.Revision]
+		list = append(list, &newPR)
+		m[pr.Spec.RepositoryName][pr.Spec.PackageName][pr.Spec.Revision] = list
 	}
 
 	r.packageRevs = packageRevs
@@ -372,7 +376,8 @@ func (r *PackageDeploymentReconciler) findPackageRevision(ns, repo, pkg, rev str
 	if _, ok := r.packageRevs[ns][repo][pkg][rev]; !ok {
 		return nil
 	}
-	return r.packageRevs[ns][repo][pkg][rev]
+	list := r.packageRevs[ns][repo][pkg][rev]
+	return list[0]
 }
 
 func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
@@ -380,9 +385,11 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 	c *infrav1alpha1.Cluster,
 	sourcePR *porchv1alpha1.PackageRevision) (*porchv1alpha1.PackageRevision, error) {
 
-	// What we SHOULD do in here is:
+	// What we do here is:
 	//   - Check if the target repo has the package already
-	//   - If not, clone it and we're done. Otherwise continue
+	//   - If not, clone it and we're done. Otherwise continue.
+	//   - If there is a downstream package draft, look at the draft. Otherwise, look at
+	//     the latest published downstream package revision.
 	//   - Compare the UPSTREAM (base) revision of the package against
 	//     the package in the PackageDeployment. Note that the revision
 	//     stored in r.packageRevs will contain the LOCAL (downstream)
@@ -391,9 +398,6 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 	//   - If the PackageDeployment revision is different from the UPSTREAM
 	//     revision of the package, then update the package to that revision
 	//     (which could be an upgrade OR downgrade).
-	//
-	// What we ACTUALLY do in here is:
-	//   - Just the first thing - clone it - no updates
 	//
 	ns := "default"
 	if pd.Namespace != "" {
@@ -411,13 +415,54 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 	// check if the package already exists downstream
 	if byRepo, ok := r.packageRevs[ns]; ok {
 		if byPkg, ok := byRepo[c.RepositoryRef.Name]; ok {
-			if _, ok := byPkg[newPackageName]; ok {
-				// downstream package already exists
-				// TODO: Update the downstream package if needed.
-				return nil, nil
+			if byRev, ok := byPkg[newPackageName]; ok {
+				// Look for a downstream package revision. We will update either
+				// the draft, or the latest published revision.
+				// TODO: Use owner refs to identify which package revisions
+				// we should look at (when porch is ready).
+				var draft *porchv1alpha1.PackageRevision
+				var latestPublished *porchv1alpha1.PackageRevision
+				// the first package revision number that porch assigns is "v1",
+				// so use v0 as a placeholder for now
+				latestVersion := "v0"
+				for _, pkgList := range byRev {
+					pkgRev := pkgList[0]
+					if pkgRev.Spec.Lifecycle != porchv1alpha1.PackageRevisionLifecyclePublished {
+						draft = pkgRev
+					} else {
+						switch cmp := semver.Compare(pkgRev.Spec.Revision, latestVersion); {
+						case cmp == 0:
+							// Same revision.
+						case cmp < 0:
+							// current < latest; no change
+						case cmp > 0:
+							// current > latest; update latest
+							latestVersion = pkgRev.Spec.Revision
+							latestPublished = pkgRev
+						}
+					}
+				}
+
+				if len(byRev) > 0 {
+					// If there is a downstream package revision draft, update and
+					// return it. We should never end up with more than one draft at a time.
+					if draft != nil {
+						if upstreamPR := r.discoverUpdate(ctx, draft, pd.Spec.PackageRef.Revision); upstreamPR == nil {
+							return draft, nil
+						} else {
+							return r.updateDraft(ctx, draft, upstreamPR)
+						}
+					}
+					// If no drafts, find the latest published package revision,
+					// copy, update, and return it.
+					return r.updateLatest(ctx, latestPublished, pd.Spec.PackageRef.Revision)
+				}
 			}
 		}
 	}
+
+	// If no downstream package revisions managed by this controller,
+	// create one.
 
 	// We SHOULD be adding an ownerRef with the controller and PD info,
 	// This would be to facilitate pruning. I am not sure if the aggregated
@@ -435,7 +480,7 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 			//PackageName:    sourcePR.Spec.PackageName,
 			//Revision:       sourcePR.Spec.Revision,
 			PackageName:    newPackageName,
-			WorkspaceName:  porchv1alpha1.WorkspaceName(fmt.Sprintf("ws-%d", wsNum)),
+			WorkspaceName:  porchv1alpha1.WorkspaceName(fmt.Sprintf("packagedeployment-1")),
 			RepositoryName: c.RepositoryRef.Name,
 			Tasks: []porchv1alpha1.Task{
 				{
@@ -455,8 +500,6 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-
-	wsNum++
 
 	r.l.Info("Created PackageRevision", "newPR", newPR)
 	return newPR, nil
@@ -479,4 +522,168 @@ func (r *PackageDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&automationv1alpha1.PackageDeployment{}).
 		Complete(r)
+}
+
+func (r *PackageDeploymentReconciler) discoverUpdate(ctx context.Context,
+	sourcePR *porchv1alpha1.PackageRevision, targetUpstreamRevision string) *porchv1alpha1.PackageRevision {
+	upstreamLock := sourcePR.Status.UpstreamLock
+	repoList := configapi.RepositoryList{}
+	err := r.PorchClient.List(ctx, &repoList, &client.ListOptions{})
+	if err != nil {
+		return nil
+	}
+	return r.getNewUpstreamPR(ctx, upstreamLock, &repoList, targetUpstreamRevision)
+}
+
+func (r *PackageDeploymentReconciler) updateDraft(ctx context.Context,
+	sourcePR *porchv1alpha1.PackageRevision,
+	newUpstreamPR *porchv1alpha1.PackageRevision) (*porchv1alpha1.PackageRevision, error) {
+	oldPR := sourcePR.DeepCopy()
+	tasks := sourcePR.Spec.Tasks
+	cloneTask := tasks[0]
+	updateTask := porchv1alpha1.Task{
+		Type: porchv1alpha1.TaskTypeUpdate,
+		Update: &porchv1alpha1.PackageUpdateTaskSpec{
+			Upstream: cloneTask.Clone.Upstream,
+		},
+	}
+	updateTask.Update.Upstream.UpstreamRef.Name = newUpstreamPR.Name
+	oldPR.Spec.Tasks = append(oldPR.Spec.Tasks, updateTask)
+
+	err := r.PorchClient.Update(ctx, oldPR)
+	if err != nil {
+		return nil, err
+	}
+	return oldPR, nil
+}
+
+// Updating a published package revision means making a copy of it and updating the
+// newly created draft.
+func (r *PackageDeploymentReconciler) updateLatest(ctx context.Context,
+	sourcePR *porchv1alpha1.PackageRevision, targetPackageRevision string) (*porchv1alpha1.PackageRevision, error) {
+	upstreamPR := r.discoverUpdate(ctx, sourcePR, targetPackageRevision)
+	if upstreamPR == nil {
+		return sourcePR, nil
+	}
+	newPR := &porchv1alpha1.PackageRevision{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "PackageRevision",
+			APIVersion: porchv1alpha1.SchemeGroupVersion.Identifier(),
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: sourcePR.Namespace,
+		},
+		Spec: sourcePR.Spec,
+	}
+
+	newPR.Spec.Revision = ""
+	wsNumStr := strings.TrimPrefix(string(newPR.Spec.WorkspaceName), "packagedeployment-")
+	wsNum, _ := strconv.Atoi(wsNumStr)
+	wsNum++
+	newPR.Spec.WorkspaceName = porchv1alpha1.WorkspaceName(fmt.Sprintf("packagedeployment-%d", wsNum))
+	newPR.Spec.Lifecycle = porchv1alpha1.PackageRevisionLifecycleDraft
+
+	if err := r.PorchClient.Create(ctx, newPR); err != nil {
+		return nil, err
+	}
+
+	if err := r.loadPackageRevisions(ctx); err != nil {
+		return nil, err
+	}
+
+	// get the newly created package back
+	if byRepo, ok := r.packageRevs[newPR.ObjectMeta.Namespace]; ok {
+		if byPkg, ok := byRepo[newPR.Spec.RepositoryName]; ok {
+			if byRev, ok := byPkg[newPR.Spec.PackageName]; ok {
+				drafts := byRev[""]
+				for _, draft := range drafts {
+					if draft.Spec.WorkspaceName == newPR.Spec.WorkspaceName {
+						return r.updateDraft(ctx, draft, upstreamPR)
+					}
+				}
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("could not find newly created package revision")
+}
+
+func (r *PackageDeploymentReconciler) getNewUpstreamPR(ctx context.Context, upstreamLock *porchv1alpha1.UpstreamLock, repositories *configapi.RepositoryList,
+	targetUpstreamRevision string) *porchv1alpha1.PackageRevision {
+	// This code is largely copied from the availableUpdates function in
+	// this file: https://github.com/GoogleContainerTools/kpt/blob/04f18c7cd8ff97986ec75c0b1cb03cad77348320/commands/alpha/rpkg/update/discover.go#L96
+	// We can probably refactor the kpt code into a library so that clients can consume it directly.
+	var update *porchv1alpha1.PackageRevision
+
+	if upstreamLock == nil || upstreamLock.Git == nil {
+		return nil
+	}
+	var currentUpstreamRevision string
+
+	// separate the revision number from the package name
+	lastIndex := strings.LastIndex(upstreamLock.Git.Ref, "/")
+
+	if strings.HasPrefix(upstreamLock.Git.Ref, "drafts") {
+		// The upstream is not a published package, we don't support this yet.
+		return nil
+	}
+
+	currentUpstreamRevision = upstreamLock.Git.Ref[lastIndex+1:]
+	if currentUpstreamRevision == targetUpstreamRevision {
+		// we don't need to do anything
+		return nil
+	}
+
+	// upstream.git.ref looks like pkgname/version
+	upstreamPackageName := upstreamLock.Git.Ref[:lastIndex]
+	upstreamPackageName = strings.TrimPrefix(upstreamPackageName, "/")
+
+	if !strings.HasSuffix(upstreamLock.Git.Repo, ".git") {
+		upstreamLock.Git.Repo += ".git"
+	}
+
+	// find a repo that matches the upstreamLock
+	var revisions []porchv1alpha1.PackageRevision
+	for _, repo := range repositories.Items {
+		if repo.Spec.Type != configapi.RepositoryTypeGit {
+			// we are not currently supporting non-git repos for updates
+			continue
+		}
+		if !strings.HasSuffix(repo.Spec.Git.Repo, ".git") {
+			repo.Spec.Git.Repo += ".git"
+		}
+		if upstreamLock.Git.Repo == repo.Spec.Git.Repo {
+			revisions, _ = r.getUpstreamRevisions(ctx, repo, upstreamPackageName)
+		}
+	}
+
+	for _, upstreamRevision := range revisions {
+		if upstreamRevision.Spec.Revision == targetUpstreamRevision {
+			update = &upstreamRevision
+			break
+		}
+	}
+
+	return update
+}
+
+// fetches all package revision numbers for packages with the name upstreamPackageName from the repo
+func (r *PackageDeploymentReconciler) getUpstreamRevisions(ctx context.Context, repo configapi.Repository, upstreamPackageName string) ([]porchv1alpha1.PackageRevision, error) {
+	var result []porchv1alpha1.PackageRevision
+
+	var prList porchv1alpha1.PackageRevisionList
+	if err := r.PorchClient.List(ctx, &prList); err != nil {
+		r.l.Error(err, "could not list package revisions")
+		return nil, err
+	}
+	for _, pkgRev := range prList.Items {
+		if pkgRev.Spec.Lifecycle != porchv1alpha1.PackageRevisionLifecyclePublished {
+			// only consider published packages
+			continue
+		}
+		if pkgRev.Spec.RepositoryName == repo.Name && pkgRev.Spec.PackageName == upstreamPackageName {
+			result = append(result, pkgRev)
+		}
+	}
+	return result, nil
 }
