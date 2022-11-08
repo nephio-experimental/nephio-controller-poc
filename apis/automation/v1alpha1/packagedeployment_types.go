@@ -62,6 +62,7 @@ type PackageDeploymentSpec struct {
 
 // PackageDeploymentStatus defines the observed state of PackageDeployment
 type PackageDeploymentStatus struct {
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 //+kubebuilder:object:root=true

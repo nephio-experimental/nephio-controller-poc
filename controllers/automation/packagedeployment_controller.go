@@ -26,6 +26,7 @@ import (
 
 	configapi "github.com/GoogleContainerTools/kpt/porch/api/porchconfig/v1alpha1"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -131,7 +132,8 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	//  - Create new PackageRevisions for new matches
 	//  - Verify the version for existing matches
 	//
-	// This code ONLY creates new PackageRevisions for new matches
+	// This code ONLY creates new PackageRevisions for new matches and performs updates
+	// on existing matches.
 	//
 
 	// For each cluster, we want to create a variant of the package
@@ -160,7 +162,7 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			continue
 		}
 
-		if err := r.applyPackageMutations(ctx, targetNS, &c, newPR); err != nil {
+		if err := r.applyPackageMutations(ctx, pd, targetNS, &c, newPR); err != nil {
 			r.l.Error(err, "could not apply package mutations")
 			continue
 		}
@@ -172,6 +174,7 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 }
 
 func (r *PackageDeploymentReconciler) applyPackageMutations(ctx context.Context,
+	pd *automationv1alpha1.PackageDeployment,
 	targetNS string,
 	c *infrav1alpha1.Cluster,
 	newPR *porchv1alpha1.PackageRevision) error {
@@ -212,6 +215,9 @@ func (r *PackageDeploymentReconciler) applyPackageMutations(ctx context.Context,
 					Namespace: n.GetNamespace(),
 				},
 			}
+			if id.Namespace == "" {
+				id.NameMeta.Namespace = "default"
+			}
 			bindingResources[id] = n
 		}
 	}
@@ -238,8 +244,13 @@ metadata:
 
 	for id, pkgResource := range bindingResources {
 		clusterResource, err := r.findClusterObject(ctx, c, id)
+		conditions := &pd.Status.Conditions
+		group, _ := resid.ParseGroupVersion(id.APIVersion)
+		conditionType := fmt.Sprintf("%s.%s.%s.%s.Injected", group, id.Kind, c.Name, c.Namespace)
 		if err != nil {
-			r.l.Info(fmt.Sprintf("error finding cluster resource: %s", err.Error()), "cluster", c)
+			r.l.Info(fmt.Sprintf("error looking for cluster resource: %s", err.Error()), "cluster", c)
+			meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
+				Reason: "ResourceNotFound", Message: fmt.Sprintf(err.Error())})
 			continue
 		}
 		if clusterResource != nil {
@@ -248,12 +259,17 @@ metadata:
 			if err := r.s.Encode(clusterResource, &spYamlBuf); err != nil {
 				r.l.Error(err, fmt.Sprintf("could not write resource with apiVersion %q and kind %q as yaml",
 					id.APIVersion, id.Kind), "clusterResource", clusterResource)
+				meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
+					Reason: "ResourceEncodeErr", Message: fmt.Sprintf("could not encode resource with apiVersion %q, kind %q, name %q, and namespace %q"+
+						" in the cluster: %s", id.APIVersion, id.Kind, c.Name, id.Namespace, err.Error())})
 				return err
 			}
 
 			spNode, err := yaml.Parse(spYamlBuf.String())
 			if err != nil {
-				r.l.Error(err, "could not parse scale profile yaml", "spYaml", spYamlBuf.String())
+				r.l.Error(err, "could not parse cluster object yaml", "spYaml", spYamlBuf.String())
+				meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
+					Reason: "ResourceParseErr", Message: err.Error()})
 				return err
 			}
 
@@ -262,8 +278,20 @@ metadata:
 			if err := pkgResource.SetMapField(field.Value, "spec"); err != nil {
 				str, _ := spNode.String()
 				r.l.Error(err, "could not set object spec", "spNode", str)
+				meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
+					Reason: "ResourceSpecErr", Message: err.Error()})
 				return err
 			}
+
+			meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionTrue,
+				Reason: "ResourceInjectedFromCluster", Message: fmt.Sprintf("resource with apiVersion %q, kind %q, name %q, and namespace %q injected in the cluster",
+					id.APIVersion, id.Kind, c.Name, id.Namespace)})
+		}
+	}
+
+	if updateErr := r.Status().Update(ctx, pd); updateErr != nil {
+		if err == nil {
+			return updateErr
 		}
 	}
 
