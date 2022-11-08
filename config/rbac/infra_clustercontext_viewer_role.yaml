@@ -1,0 +1,27 @@
+# permissions for end users to view clustercontexts.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: clustercontext-viewer-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: nephio
+    app.kubernetes.io/part-of: nephio
+    app.kubernetes.io/managed-by: kustomize
+  name: clustercontext-viewer-role
+rules:
+- apiGroups:
+  - infra.nephio.org
+  resources:
+  - clustercontexts
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - infra.nephio.org
+  resources:
+  - clustercontexts/status
+  verbs:
+  - get

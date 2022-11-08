@@ -30,4 +30,12 @@ resources:
   kind: ClusterScaleProfile
   path: github.com/nephio-project/nephio-controller-poc/apis/infra/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: nephio.org
+  group: infra
+  kind: ClusterContext
+  path: github.com/nephio-project/nephio-controller-poc/apis/infra/v1alpha1
+  version: v1alpha1
 version: "3"

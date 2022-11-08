@@ -1,0 +1,12 @@
+apiVersion: infra.nephio.org/v1alpha1
+kind: ClusterContext
+metadata:
+  labels:
+    app.kubernetes.io/name: clustercontext
+    app.kubernetes.io/instance: clustercontext-sample
+    app.kubernetes.io/part-of: nephio
+    app.kuberentes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: nephio
+  name: clustercontext-sample
+spec:
+  # TODO(user): Add fields here
