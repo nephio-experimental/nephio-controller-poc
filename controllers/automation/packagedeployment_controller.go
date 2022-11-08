@@ -31,10 +31,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
+	"k8s.io/apimachinery/pkg/types"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"sigs.k8s.io/kustomize/kyaml/resid"
 	"sigs.k8s.io/kustomize/kyaml/yaml"
@@ -70,6 +74,7 @@ type PackageDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=automation.nephio.org,resources=packagedeployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=automation.nephio.org,resources=packagedeployments/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=automation.nephio.org,resources=packagedeployments/finalizers,verbs=update
+//+kubebuilder:rbac:groups=infra.nephio.org,resources=clusters,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -521,7 +526,29 @@ func (r *PackageDeploymentReconciler) loadResourceList(ctx context.Context, pr *
 func (r *PackageDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&automationv1alpha1.PackageDeployment{}).
+		Watches(&source.Kind{Type: &infrav1alpha1.Cluster{}},
+			handler.EnqueueRequestsFromMapFunc(r.mapClustersToRequests)).
 		Complete(r)
+}
+
+func (r *PackageDeploymentReconciler) mapClustersToRequests(cluster client.Object) []reconcile.Request {
+	attachedPackageDeployments := &automationv1alpha1.PackageDeploymentList{}
+	err := r.List(context.TODO(), attachedPackageDeployments, &client.ListOptions{
+		Namespace: cluster.GetNamespace(),
+	})
+	if err != nil {
+		return []reconcile.Request{}
+	}
+	requests := make([]reconcile.Request, len(attachedPackageDeployments.Items))
+	for i, item := range attachedPackageDeployments.Items {
+		requests[i] = reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      item.GetName(),
+				Namespace: item.GetNamespace(),
+			},
+		}
+	}
+	return requests
 }
 
 func (r *PackageDeploymentReconciler) discoverUpdate(ctx context.Context,

@@ -31,3 +31,11 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - infra.nephio.org
+  resources:
+  - clusters
+  verbs:
+  - get
+  - list
+  - watch
