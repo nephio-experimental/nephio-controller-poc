@@ -50,6 +50,7 @@ import (
 	automationv1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/automation/v1alpha1"
 	infrav1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/infra/v1alpha1"
 
+	kptfile "github.com/GoogleContainerTools/kpt/pkg/api/kptfile/v1"
 	porchv1alpha1 "github.com/GoogleContainerTools/kpt/porch/api/porch/v1alpha1"
 	"github.com/nephio-project/nephio-controller-poc/pkg/porch"
 )
@@ -162,7 +163,7 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			continue
 		}
 
-		if err := r.applyPackageMutations(ctx, pd, targetNS, &c, newPR); err != nil {
+		if err := r.applyPackageMutations(ctx, targetNS, &c, newPR); err != nil {
 			r.l.Error(err, "could not apply package mutations")
 			continue
 		}
@@ -174,7 +175,6 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 }
 
 func (r *PackageDeploymentReconciler) applyPackageMutations(ctx context.Context,
-	pd *automationv1alpha1.PackageDeployment,
 	targetNS string,
 	c *infrav1alpha1.Cluster,
 	newPR *porchv1alpha1.PackageRevision) error {
@@ -241,10 +241,10 @@ metadata:
 	// If a binding resource exists in the package, and one exists
 	// that matches the name of the associated cluster, overwrite the
 	// resource in the package with the cluster resource
+	conditions := convertConditions(newPR.Status.Conditions)
 
 	for id, pkgResource := range bindingResources {
 		clusterResource, err := r.findClusterObject(ctx, c, id)
-		conditions := &pd.Status.Conditions
 		group, _ := resid.ParseGroupVersion(id.APIVersion)
 		conditionType := fmt.Sprintf("%s.%s.%s.%s.Injected", group, id.Kind, c.Name, c.Namespace)
 		if err != nil {
@@ -289,9 +289,32 @@ metadata:
 		}
 	}
 
-	if updateErr := r.Status().Update(ctx, pd); updateErr != nil {
-		if err == nil {
-			return updateErr
+	var prConditions []kptfile.Condition
+	for _, c := range *conditions {
+		prConditions = append(prConditions, kptfile.Condition{
+			Type:    c.Type,
+			Reason:  c.Reason,
+			Status:  kptfile.ConditionStatus(c.Status),
+			Message: c.Message,
+		})
+	}
+
+	for i, n := range pkgBuf.Nodes {
+		if n.GetKind() == "Kptfile" {
+			// we need to update the status
+			nStr := n.MustString()
+			var kf kptfile.KptFile
+			if err := yaml.Unmarshal([]byte(nStr), &kf); err != nil {
+				return err
+			}
+			if kf.Status == nil {
+				kf.Status = &kptfile.Status{}
+			}
+			kf.Status.Conditions = prConditions
+
+			kfBytes, _ := yaml.Marshal(kf)
+			node := yaml.MustParse(string(kfBytes))
+			pkgBuf.Nodes[i] = node
 		}
 	}
 
@@ -313,6 +336,19 @@ metadata:
 	r.l.Info("updated PackageRevisionResources", "resources", resources)
 
 	return nil
+}
+
+func convertConditions(conditions []porchv1alpha1.Condition) *[]metav1.Condition {
+	var result []metav1.Condition
+	for _, c := range conditions {
+		result = append(result, metav1.Condition{
+			Type:    c.Type,
+			Reason:  c.Reason,
+			Status:  metav1.ConditionStatus(c.Status),
+			Message: c.Message,
+		})
+	}
+	return &result
 }
 
 func (r *PackageDeploymentReconciler) findClusterObject(ctx context.Context, c *infrav1alpha1.Cluster,
@@ -445,6 +481,8 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 		newPackageName = *pd.Spec.Namespace
 	}
 
+	r.l.Info("looking for downstream package")
+
 	// check if the package already exists downstream
 	if byRepo, ok := r.packageRevs[ns]; ok {
 		if byPkg, ok := byRepo[c.RepositoryRef.Name]; ok {
@@ -488,6 +526,7 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 					}
 					// If no drafts, find the latest published package revision,
 					// copy, update, and return it.
+					r.l.Info("updating the latest published package revision")
 					return r.updateLatest(ctx, latestPublished, pd.Spec.PackageRef.Revision)
 				}
 			}
@@ -638,11 +677,37 @@ func (r *PackageDeploymentReconciler) updateLatest(ctx context.Context,
 	newPR.Spec.WorkspaceName = porchv1alpha1.WorkspaceName(fmt.Sprintf("packagedeployment-%d", wsNum))
 	newPR.Spec.Lifecycle = porchv1alpha1.PackageRevisionLifecycleDraft
 
+	var found bool
+
 	if err := r.PorchClient.Create(ctx, newPR); err != nil {
-		return nil, err
+		r.l.Error(err, "failed to create new package revision")
+		if strings.Contains(err.Error(), "patch wants to create file \"non-namespaced/default.yaml\" but already exists") {
+			for i, task := range newPR.Spec.Tasks {
+				if task.Type == porchv1alpha1.TaskTypePatch {
+					for j := 0; j < len(task.Patch.Patches); j++ {
+						patch := task.Patch.Patches[j]
+						// This is papering over a real issue with porch seeming to create duplicate tasks for the namespace for some reason, but
+						// in the interest of time, I created this hacky fix/workaround rather than addressing the root cause, which I think will be
+						// OK for a demo.
+						if patch.File == "non-namespaced/default.yaml" && patch.PatchType == "CreateFile" {
+							if found {
+								newPR.Spec.Tasks[i].Patch.Patches = append(newPR.Spec.Tasks[i].Patch.Patches[0:j], newPR.Spec.Tasks[i].Patch.Patches[j+1:]...)
+								j = j - 1
+							}
+							found = true
+						}
+					}
+				}
+			}
+		}
+
+		if err := r.PorchClient.Create(ctx, newPR); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := r.loadPackageRevisions(ctx); err != nil {
+		r.l.Error(err, "could not load package revisions")
 		return nil, err
 	}
 
@@ -653,6 +718,7 @@ func (r *PackageDeploymentReconciler) updateLatest(ctx context.Context,
 				drafts := byRev[""]
 				for _, draft := range drafts {
 					if draft.Spec.WorkspaceName == newPR.Spec.WorkspaceName {
+						r.l.Info("updating the newly created draft")
 						return r.updateDraft(ctx, draft, upstreamPR)
 					}
 				}
