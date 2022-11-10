@@ -127,15 +127,15 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// WARNING WARNING WARNING
 	// NOTE: this is bad, it's only looking at "first run" - this is PROOF OF CONCEPT
 	// code, not production code. What we MUST do in a real controller is:
-	//  - Identify all PackageRevisions that should exist based on the current spec
-	//  - Identify existing PackageRevisions created by this controller
-	//  - Prune PackageRevisions we created that no long are part of this spec
-	//  - Create new PackageRevisions for new matches
-	//  - Verify the version for existing matches
+	//  - (1) Identify all PackageRevisions that should exist based on the current spec
+	//  - (2) Identify existing PackageRevisions created by this controller
+	//  - (3) Prune PackageRevisions we created that no long are part of this spec
+	//  - (4) Create new PackageRevisions for new matches
+	//  - (5) Verify the version for existing matches
 	//
-	// This code ONLY creates new PackageRevisions for new matches and performs updates
-	// on existing matches.
-	//
+	// This code creates new PackageRevisions for new matches and performs updates
+	// on existing matches (1, 4, and 5) . It does not identify existing PackageRevisions nor
+	// does it do pruning (2 and 3).
 
 	// For each cluster, we want to create a variant of the package
 	// in the associated repository. There are two mutations we will
@@ -204,21 +204,22 @@ func (r *PackageDeploymentReconciler) applyPackageMutations(ctx context.Context,
 
 		// search for binding resources
 		annotations := n.GetAnnotations()
-		if value, found := annotations["automation.nephio.org/config-injection"]; found && value == "True" {
-			id := yaml.ResourceIdentifier{
-				TypeMeta: yaml.TypeMeta{
-					APIVersion: n.GetApiVersion(),
-					Kind:       n.GetKind(),
-				},
-				NameMeta: yaml.NameMeta{
-					Name:      n.GetName(),
-					Namespace: n.GetNamespace(),
-				},
+
+		if value, found := annotations["automation.nephio.org/config-injection"]; found {
+			valueAsBool, err := strconv.ParseBool(value)
+			if err == nil && valueAsBool {
+				id := yaml.ResourceIdentifier{
+					TypeMeta: yaml.TypeMeta{
+						APIVersion: n.GetApiVersion(),
+						Kind:       n.GetKind(),
+					},
+					NameMeta: yaml.NameMeta{
+						Name:      n.GetName(),
+						Namespace: n.GetNamespace(),
+					},
+				}
+				bindingResources[id] = n
 			}
-			if id.Namespace == "" {
-				id.NameMeta.Namespace = "default"
-			}
-			bindingResources[id] = n
 		}
 	}
 
@@ -245,8 +246,8 @@ metadata:
 
 	for id, pkgResource := range bindingResources {
 		clusterResource, err := r.findClusterObject(ctx, c, id)
-		group, _ := resid.ParseGroupVersion(id.APIVersion)
-		conditionType := fmt.Sprintf("%s.%s.%s.%s.Injected", group, id.Kind, c.Name, c.Namespace)
+		conditionType := fmt.Sprintf("%s.%s.%s.Injected", strings.Title(id.Kind), strings.Title(c.Name),
+			strings.Title(c.Namespace))
 		if err != nil {
 			r.l.Info(fmt.Sprintf("error looking for cluster resource: %s", err.Error()), "cluster", c)
 			meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
@@ -261,7 +262,7 @@ metadata:
 					id.APIVersion, id.Kind), "clusterResource", clusterResource)
 				meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
 					Reason: "ResourceEncodeErr", Message: fmt.Sprintf("could not encode resource with apiVersion %q, kind %q, name %q, and namespace %q"+
-						" in the cluster: %s", id.APIVersion, id.Kind, c.Name, id.Namespace, err.Error())})
+						" in the cluster: %s", id.APIVersion, id.Kind, c.Name, c.Namespace, err.Error())})
 				return err
 			}
 
@@ -284,8 +285,9 @@ metadata:
 			}
 
 			meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionTrue,
-				Reason: "ResourceInjectedFromCluster", Message: fmt.Sprintf("resource with apiVersion %q, kind %q, name %q, and namespace %q injected in the cluster",
-					id.APIVersion, id.Kind, c.Name, id.Namespace)})
+				Reason: "ResourceInjectedFromCluster", Message: fmt.Sprintf("resource with apiVersion %q, kind %q, name %q, and namespace %q injected "+
+					"to the package revision from the cluster",
+					id.APIVersion, id.Kind, c.Name, c.Namespace)})
 		}
 	}
 
@@ -677,33 +679,10 @@ func (r *PackageDeploymentReconciler) updateLatest(ctx context.Context,
 	newPR.Spec.WorkspaceName = porchv1alpha1.WorkspaceName(fmt.Sprintf("packagedeployment-%d", wsNum))
 	newPR.Spec.Lifecycle = porchv1alpha1.PackageRevisionLifecycleDraft
 
-	var found bool
-
 	if err := r.PorchClient.Create(ctx, newPR); err != nil {
 		r.l.Error(err, "failed to create new package revision")
-		if strings.Contains(err.Error(), "patch wants to create file \"non-namespaced/default.yaml\" but already exists") {
-			for i, task := range newPR.Spec.Tasks {
-				if task.Type == porchv1alpha1.TaskTypePatch {
-					for j := 0; j < len(task.Patch.Patches); j++ {
-						patch := task.Patch.Patches[j]
-						// This is papering over a real issue with porch seeming to create duplicate tasks for the namespace for some reason, but
-						// in the interest of time, I created this hacky fix/workaround rather than addressing the root cause, which I think will be
-						// OK for a demo.
-						if patch.File == "non-namespaced/default.yaml" && patch.PatchType == "CreateFile" {
-							if found {
-								newPR.Spec.Tasks[i].Patch.Patches = append(newPR.Spec.Tasks[i].Patch.Patches[0:j], newPR.Spec.Tasks[i].Patch.Patches[j+1:]...)
-								j = j - 1
-							}
-							found = true
-						}
-					}
-				}
-			}
-		}
+		return nil, err
 
-		if err := r.PorchClient.Create(ctx, newPR); err != nil {
-			return nil, err
-		}
 	}
 
 	if err := r.loadPackageRevisions(ctx); err != nil {
