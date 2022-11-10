@@ -246,8 +246,8 @@ metadata:
 
 	for id, pkgResource := range bindingResources {
 		clusterResource, err := r.findClusterObject(ctx, c, id)
-		conditionType := fmt.Sprintf("%s.%s.%s.Injected", strings.Title(id.Kind), strings.Title(c.Name),
-			strings.Title(c.Namespace))
+		group, _ := resid.ParseGroupVersion(id.APIVersion)
+		conditionType := fmt.Sprintf("%s.%s.%s.%s.Injected", group, id.Kind, c.Name, c.Namespace)
 		if err != nil {
 			r.l.Info(fmt.Sprintf("error looking for cluster resource: %s", err.Error()), "cluster", c)
 			meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
