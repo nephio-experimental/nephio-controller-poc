@@ -1,6 +1,16 @@
+#REGISTRY ?= us-central1-docker.pkg.dev/pure-faculty-367518/nephio-workshop
+REGISTRY ?= gcr.io/jbelamaric-public
+PROJECT ?= package-deployment
+TAG ?= latest
+CONTROLLER_NAME ?= $(PROJECT)-controller
 
 # Image URL to use all building/pushing image targets
-IMG ?= us-central1-docker.pkg.dev/pure-faculty-367518/nephio-workshop/package-deployment-controller:latest
+ifeq (,$(REGISTRY))
+IMG ?= $(CONTROLLER_NAME):$(TAG)
+else
+IMG ?= $(REGISTRY)/$(CONTROLLER_NAME):$(TAG)
+endif
+
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.24.2
 
@@ -76,6 +86,20 @@ docker-build: test ## Build docker image with the manager.
 docker-push: ## Push docker image with the manager.
 	docker push ${IMG}
 
+KPTGEN_CFG_DIR = package/fn-config
+KPT_PKG_DIR = package/$(CONTROLLER_NAME)
+
+.PHONY: package
+package: controller-gen kpt kptgen $(KPTGEN_CFG_DIR)
+	rm -rf ${KPT_PKG_DIR}/
+	mkdir ${KPT_PKG_DIR}
+	$(KPT) pkg init ${KPT_PKG_DIR} --description "${PROJECT} controller"
+	$(CONTROLLER_GEN) crd paths="./..." output:crd:dir=${KPT_PKG_DIR}/crds
+	$(KPTGEN) apply config ${KPT_PKG_DIR} --fn-config-dir ${KPTGEN_CFG_DIR}
+	$(KPT) fn eval --image gcr.io/kpt-fn/set-image:v0.1.1 ${KPT_PKG_DIR} -- name=controller newName=${REGISTRY}/${CONTROLLER_NAME} newTag=${TAG}
+	$(KPT) fn eval --image gcr.io/kpt-fn/set-namespace:v0.1.1 ${KPT_PKG_DIR} -- namespace=nephio-system
+	echo "***** NOTE NOTE NOTE this package isn't quite right, the namespace is missing from the cluster role binding subject *******"
+
 ##@ Deployment
 
 ifndef ignore-not-found
@@ -110,10 +134,14 @@ $(LOCALBIN):
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
+KPT ?= $(LOCALBIN)/kpt
+KPTGEN ?= $(LOCALBIN)/kptgen
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v3.8.7
 CONTROLLER_TOOLS_VERSION ?= v0.9.2
+KPT_VERSION ?= main
+KPTGEN_VERSION ?= v0.0.9
 
 KUSTOMIZE_INSTALL_SCRIPT ?= "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"
 .PHONY: kustomize
@@ -130,3 +158,13 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+
+.PHONY: kpt
+kpt: $(KPT) ## Download kpt locally if necessary.
+$(KPT): $(LOCALBIN)
+	test -s $(LOCALBIN)/kpt || GOBIN=$(LOCALBIN) go install -v github.com/GoogleContainerTools/kpt@$(KPT_VERSION)
+
+.PHONY: kptgen
+kptgen: $(KPTGEN)
+$(KPTGEN): $(LOCALBIN)
+	test -s $(LOCALBIN)/kptgen || GOBIN=$(LOCALBIN) go install -v github.com/henderiw-kpt/kptgen@$(KPTGEN_VERSION)
