@@ -26,6 +26,7 @@ import (
 
 	configapi "github.com/GoogleContainerTools/kpt/porch/api/porchconfig/v1alpha1"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -49,6 +50,7 @@ import (
 	automationv1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/automation/v1alpha1"
 	infrav1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/infra/v1alpha1"
 
+	kptfile "github.com/GoogleContainerTools/kpt/pkg/api/kptfile/v1"
 	porchv1alpha1 "github.com/GoogleContainerTools/kpt/porch/api/porch/v1alpha1"
 	"github.com/nephio-project/nephio-controller-poc/pkg/porch"
 )
@@ -125,14 +127,15 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// WARNING WARNING WARNING
 	// NOTE: this is bad, it's only looking at "first run" - this is PROOF OF CONCEPT
 	// code, not production code. What we MUST do in a real controller is:
-	//  - Identify all PackageRevisions that should exist based on the current spec
-	//  - Identify existing PackageRevisions created by this controller
-	//  - Prune PackageRevisions we created that no long are part of this spec
-	//  - Create new PackageRevisions for new matches
-	//  - Verify the version for existing matches
+	//  - (1) Identify all PackageRevisions that should exist based on the current spec
+	//  - (2) Identify existing PackageRevisions created by this controller
+	//  - (3) Prune PackageRevisions we created that no long are part of this spec
+	//  - (4) Create new PackageRevisions for new matches
+	//  - (5) Verify the version for existing matches
 	//
-	// This code ONLY creates new PackageRevisions for new matches
-	//
+	// This code creates new PackageRevisions for new matches and performs updates
+	// on existing matches (1, 4, and 5) . It does not identify existing PackageRevisions nor
+	// does it do pruning (2 and 3).
 
 	// For each cluster, we want to create a variant of the package
 	// in the associated repository. There are two mutations we will
@@ -201,18 +204,22 @@ func (r *PackageDeploymentReconciler) applyPackageMutations(ctx context.Context,
 
 		// search for binding resources
 		annotations := n.GetAnnotations()
-		if value, found := annotations["automation.nephio.org/config-injection"]; found && value == "True" {
-			id := yaml.ResourceIdentifier{
-				TypeMeta: yaml.TypeMeta{
-					APIVersion: n.GetApiVersion(),
-					Kind:       n.GetKind(),
-				},
-				NameMeta: yaml.NameMeta{
-					Name:      n.GetName(),
-					Namespace: n.GetNamespace(),
-				},
+
+		if value, found := annotations["automation.nephio.org/config-injection"]; found {
+			valueAsBool, err := strconv.ParseBool(value)
+			if err == nil && valueAsBool {
+				id := yaml.ResourceIdentifier{
+					TypeMeta: yaml.TypeMeta{
+						APIVersion: n.GetApiVersion(),
+						Kind:       n.GetKind(),
+					},
+					NameMeta: yaml.NameMeta{
+						Name:      n.GetName(),
+						Namespace: n.GetNamespace(),
+					},
+				}
+				bindingResources[id] = n
 			}
-			bindingResources[id] = n
 		}
 	}
 
@@ -235,11 +242,16 @@ metadata:
 	// If a binding resource exists in the package, and one exists
 	// that matches the name of the associated cluster, overwrite the
 	// resource in the package with the cluster resource
+	conditions := convertConditions(newPR.Status.Conditions)
 
 	for id, pkgResource := range bindingResources {
 		clusterResource, err := r.findClusterObject(ctx, c, id)
+		group, _ := resid.ParseGroupVersion(id.APIVersion)
+		conditionType := fmt.Sprintf("%s.%s.%s.%s.Injected", group, id.Kind, c.Name, c.Namespace)
 		if err != nil {
-			r.l.Info(fmt.Sprintf("error finding cluster resource: %s", err.Error()), "cluster", c)
+			r.l.Info(fmt.Sprintf("error looking for cluster resource: %s", err.Error()), "cluster", c)
+			meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
+				Reason: "ResourceNotFound", Message: fmt.Sprintf(err.Error())})
 			continue
 		}
 		if clusterResource != nil {
@@ -248,12 +260,17 @@ metadata:
 			if err := r.s.Encode(clusterResource, &spYamlBuf); err != nil {
 				r.l.Error(err, fmt.Sprintf("could not write resource with apiVersion %q and kind %q as yaml",
 					id.APIVersion, id.Kind), "clusterResource", clusterResource)
+				meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
+					Reason: "ResourceEncodeErr", Message: fmt.Sprintf("could not encode resource with apiVersion %q, kind %q, name %q, and namespace %q"+
+						" in the cluster: %s", id.APIVersion, id.Kind, c.Name, c.Namespace, err.Error())})
 				return err
 			}
 
 			spNode, err := yaml.Parse(spYamlBuf.String())
 			if err != nil {
-				r.l.Error(err, "could not parse scale profile yaml", "spYaml", spYamlBuf.String())
+				r.l.Error(err, "could not parse cluster object yaml", "spYaml", spYamlBuf.String())
+				meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
+					Reason: "ResourceParseErr", Message: err.Error()})
 				return err
 			}
 
@@ -262,8 +279,44 @@ metadata:
 			if err := pkgResource.SetMapField(field.Value, "spec"); err != nil {
 				str, _ := spNode.String()
 				r.l.Error(err, "could not set object spec", "spNode", str)
+				meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
+					Reason: "ResourceSpecErr", Message: err.Error()})
 				return err
 			}
+
+			meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionTrue,
+				Reason: "ResourceInjectedFromCluster", Message: fmt.Sprintf("resource with apiVersion %q, kind %q, name %q, and namespace %q injected "+
+					"to the package revision from the cluster",
+					id.APIVersion, id.Kind, c.Name, c.Namespace)})
+		}
+	}
+
+	var prConditions []kptfile.Condition
+	for _, c := range *conditions {
+		prConditions = append(prConditions, kptfile.Condition{
+			Type:    c.Type,
+			Reason:  c.Reason,
+			Status:  kptfile.ConditionStatus(c.Status),
+			Message: c.Message,
+		})
+	}
+
+	for i, n := range pkgBuf.Nodes {
+		if n.GetKind() == "Kptfile" {
+			// we need to update the status
+			nStr := n.MustString()
+			var kf kptfile.KptFile
+			if err := yaml.Unmarshal([]byte(nStr), &kf); err != nil {
+				return err
+			}
+			if kf.Status == nil {
+				kf.Status = &kptfile.Status{}
+			}
+			kf.Status.Conditions = prConditions
+
+			kfBytes, _ := yaml.Marshal(kf)
+			node := yaml.MustParse(string(kfBytes))
+			pkgBuf.Nodes[i] = node
 		}
 	}
 
@@ -285,6 +338,19 @@ metadata:
 	r.l.Info("updated PackageRevisionResources", "resources", resources)
 
 	return nil
+}
+
+func convertConditions(conditions []porchv1alpha1.Condition) *[]metav1.Condition {
+	var result []metav1.Condition
+	for _, c := range conditions {
+		result = append(result, metav1.Condition{
+			Type:    c.Type,
+			Reason:  c.Reason,
+			Status:  metav1.ConditionStatus(c.Status),
+			Message: c.Message,
+		})
+	}
+	return &result
 }
 
 func (r *PackageDeploymentReconciler) findClusterObject(ctx context.Context, c *infrav1alpha1.Cluster,
@@ -417,6 +483,8 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 		newPackageName = *pd.Spec.Namespace
 	}
 
+	r.l.Info("looking for downstream package")
+
 	// check if the package already exists downstream
 	if byRepo, ok := r.packageRevs[ns]; ok {
 		if byPkg, ok := byRepo[c.RepositoryRef.Name]; ok {
@@ -460,6 +528,7 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 					}
 					// If no drafts, find the latest published package revision,
 					// copy, update, and return it.
+					r.l.Info("updating the latest published package revision")
 					return r.updateLatest(ctx, latestPublished, pd.Spec.PackageRef.Revision)
 				}
 			}
@@ -611,10 +680,13 @@ func (r *PackageDeploymentReconciler) updateLatest(ctx context.Context,
 	newPR.Spec.Lifecycle = porchv1alpha1.PackageRevisionLifecycleDraft
 
 	if err := r.PorchClient.Create(ctx, newPR); err != nil {
+		r.l.Error(err, "failed to create new package revision")
 		return nil, err
+
 	}
 
 	if err := r.loadPackageRevisions(ctx); err != nil {
+		r.l.Error(err, "could not load package revisions")
 		return nil, err
 	}
 
@@ -625,6 +697,7 @@ func (r *PackageDeploymentReconciler) updateLatest(ctx context.Context,
 				drafts := byRev[""]
 				for _, draft := range drafts {
 					if draft.Spec.WorkspaceName == newPR.Spec.WorkspaceName {
+						r.l.Info("updating the newly created draft")
 						return r.updateDraft(ctx, draft, upstreamPR)
 					}
 				}
