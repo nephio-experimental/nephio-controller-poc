@@ -475,12 +475,12 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 		ns = pd.Namespace
 	}
 
-	// Hack: our packages set the NS to the package name using
-	// set-namespace, so let's name the package in expectation of that
-	// Need to figure out the right way to do this
 	newPackageName := pd.Name
 	if pd.Spec.Namespace != nil {
 		newPackageName = *pd.Spec.Namespace
+	}
+	if pd.Spec.Name != nil {
+		newPackageName = *pd.Spec.Name
 	}
 
 	r.l.Info("looking for downstream package")
@@ -548,7 +548,9 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 			APIVersion: porchv1alpha1.SchemeGroupVersion.Identifier(),
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: ns,
+			Namespace:   ns,
+			Annotations: pd.Spec.Annotations,
+			Labels:      pd.Spec.Labels,
 		},
 		Spec: porchv1alpha1.PackageRevisionSpec{
 			//PackageName:    sourcePR.Spec.PackageName,

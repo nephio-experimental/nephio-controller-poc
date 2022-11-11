@@ -35,6 +35,21 @@ spec:
           spec:
             description: PackageDeploymentSpec defines the desired state of PackageDeployment
             properties:
+              annotations:
+                additionalProperties:
+                  type: string
+                description: Annotations will be applied to all package revisions
+                type: object
+              labels:
+                additionalProperties:
+                  type: string
+                description: Labels will be applied to all package revisions
+                type: object
+              name:
+                description: Name will be used as the name for all generated package
+                  revisions If not set, it will default to the Namespace name If neither
+                  is set, the package deployment name will be used
+                type: string
               namespace:
                 description: Namespace identifies the namespace in which to deploy
                   the package The namespace will be added to the resource list of
