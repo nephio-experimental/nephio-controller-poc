@@ -36,6 +36,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -66,6 +67,9 @@ type PackageDeploymentReconciler struct {
 	client.Client
 	Scheme      *runtime.Scheme
 	PorchClient client.Client
+
+	Controller *controller.Controller
+	Watches    map[yaml.ResourceIdentifier]bool
 
 	// NOTE: this should be updated with every request, it sucks
 	packageRevs PackageRevisionMapByNS
@@ -296,6 +300,31 @@ metadata:
 				Reason: "ResourceInjectedFromCluster", Message: fmt.Sprintf("resource with apiVersion %q, kind %q, name %q, and namespace %q injected "+
 					"to the package revision from the cluster",
 					id.APIVersion, id.Kind, c.Name, c.Namespace)})
+
+			clusterResourceId := yaml.ResourceIdentifier{
+				TypeMeta: yaml.TypeMeta{
+					APIVersion: clusterResource.GetAPIVersion(),
+					Kind:       clusterResource.GetKind(),
+				},
+				NameMeta: yaml.NameMeta{
+					Name:      clusterResource.GetName(),
+					Namespace: clusterResource.GetNamespace(),
+				},
+			}
+
+			if r.Watches == nil {
+				r.Watches = make(map[yaml.ResourceIdentifier]bool)
+			}
+
+			if _, ok := r.Watches[clusterResourceId]; !ok {
+				r.l.Info("adding watch for injection point", "clusterResource", clusterResource)
+				ctrlr := *r.Controller
+				if err := ctrlr.Watch(&source.Kind{Type: clusterResource},
+					handler.EnqueueRequestsFromMapFunc(r.mapObjectsToRequests)); err != nil {
+					r.l.Error(err, "could not add watch for cluster resource", "cluster resource", clusterResource)
+				}
+				r.Watches[clusterResourceId] = true
+			}
 		}
 	}
 
@@ -603,17 +632,19 @@ func (r *PackageDeploymentReconciler) loadResourceList(ctx context.Context, pr *
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PackageDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&automationv1alpha1.PackageDeployment{}).
 		Watches(&source.Kind{Type: &infrav1alpha1.Cluster{}},
-			handler.EnqueueRequestsFromMapFunc(r.mapClustersToRequests)).
-		Complete(r)
+			handler.EnqueueRequestsFromMapFunc(r.mapObjectsToRequests))
+	c, err := builder.Build(r)
+	r.Controller = &c
+	return err
 }
 
-func (r *PackageDeploymentReconciler) mapClustersToRequests(cluster client.Object) []reconcile.Request {
+func (r *PackageDeploymentReconciler) mapObjectsToRequests(obj client.Object) []reconcile.Request {
 	attachedPackageDeployments := &automationv1alpha1.PackageDeploymentList{}
 	err := r.List(context.TODO(), attachedPackageDeployments, &client.ListOptions{
-		Namespace: cluster.GetNamespace(),
+		Namespace: obj.GetNamespace(),
 	})
 	if err != nil {
 		return []reconcile.Request{}
