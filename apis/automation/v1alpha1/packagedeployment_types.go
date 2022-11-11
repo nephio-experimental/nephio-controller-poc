@@ -54,10 +54,21 @@ type PackageDeploymentSpec struct {
 	// PackageRef identifies the package revision to deploy
 	PackageRef PackageRevisionReference `json:"packageRef"`
 
+	// Name will be used as the name for all generated package revisions
+	// If not set, it will default to the Namespace name
+	// If neither is set, the package deployment name will be used
+	Name *string `json:"name,omitempty"`
+
 	// Namespace identifies the namespace in which to deploy the package
 	// The namespace will be added to the resource list of the package
 	// If not present, the package will be installed in the default namespace
 	Namespace *string `json:"namespace,omitempty"`
+
+	// Annotations will be applied to all package revisions
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Labels will be applied to all package revisions
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // PackageDeploymentStatus defines the observed state of PackageDeployment

@@ -1,13 +1,18 @@
 apiVersion: automation.nephio.org/v1alpha1
 kind: PackageDeployment
 metadata:
-  name: aggregation-caching-dns
+  name: edge-caching-dns
 spec:
   selector:
     matchLabels:
       nephio.org/region: us-central1
-      nephio.org/site-type: aggregation
+      nephio.org/site-type: edge
+  name: dnscache
   namespace: caching-dns
+  annotations:
+    foo: bar
+  labels:
+    bar: foofoo
   packageRef:
     repository: nephio-packages
     packageName: coredns-caching-scaled
