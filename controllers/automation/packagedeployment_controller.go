@@ -19,14 +19,19 @@ package automation
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
+	kptfile "github.com/GoogleContainerTools/kpt/pkg/api/kptfile/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"sigs.k8s.io/kustomize/kyaml/kio"
+
 	configapi "github.com/GoogleContainerTools/kpt/porch/api/porchconfig/v1alpha1"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -51,7 +56,6 @@ import (
 	automationv1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/automation/v1alpha1"
 	infrav1alpha1 "github.com/nephio-project/nephio-controller-poc/apis/infra/v1alpha1"
 
-	kptfile "github.com/GoogleContainerTools/kpt/pkg/api/kptfile/v1"
 	porchv1alpha1 "github.com/GoogleContainerTools/kpt/porch/api/porch/v1alpha1"
 	"github.com/nephio-project/nephio-controller-poc/pkg/porch"
 )
@@ -61,6 +65,8 @@ type PackageRevisionMapByRev map[string][]*porchv1alpha1.PackageRevision
 type PackageRevisionMapByPkg map[string]PackageRevisionMapByRev
 type PackageRevisionMapByRepo map[string]PackageRevisionMapByPkg
 type PackageRevisionMapByNS map[string]PackageRevisionMapByRepo
+
+const injectionHashKey = "automation.nephio.org/injection-hash"
 
 // PackageDeploymentReconciler reconciles a PackageDeployment object
 type PackageDeploymentReconciler struct {
@@ -91,6 +97,7 @@ type PackageDeploymentReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.12.2/pkg/reconcile
+
 func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	pd, err := r.startRequest(ctx, req)
 	if err != nil {
@@ -101,21 +108,13 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		r.l.Info("cannot get resource, probably deleted", "error", err.Error())
 		return ctrl.Result{}, nil
 	}
-
-	// Find the clusters matching the selector
-	selector, err := metav1.LabelSelectorAsSelector(pd.Spec.Selector)
+	}
+	clusterList, err := r.getClusterList(ctx, pd)
 	if err != nil {
-		r.l.Error(err, "could not create selector", "pd", pd)
 		return ctrl.Result{}, err
 	}
 
-	var clusterList infrav1alpha1.ClusterList
-	if err := r.List(ctx, &clusterList, client.MatchingLabelsSelector{Selector: selector}); err != nil {
-		r.l.Error(err, "could not list clusters", "selector", selector)
-		return ctrl.Result{}, err
-	}
-
-	if len(clusterList.Items) == 0 {
+	if clusterList == nil || len(clusterList.Items) == 0 {
 		r.l.Info("No clusters for PackageDeployment", "name", req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
@@ -175,7 +174,7 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			continue
 		}
 
-		if err := r.applyPackageMutations(ctx, targetNS, &c, newPR); err != nil {
+		if _, err := r.applyPackageMutations(ctx, targetNS, &c, newPR); err != nil {
 			r.l.Error(err, "could not apply package mutations")
 			continue
 		}
@@ -186,34 +185,80 @@ func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	return ctrl.Result{}, nil
 }
 
-func (r *PackageDeploymentReconciler) applyPackageMutations(ctx context.Context,
-	targetNS string,
-	c *infrav1alpha1.Cluster,
-	newPR *porchv1alpha1.PackageRevision) error {
-
-	// Load the contents of the new variant
-	resources, err := r.loadResourceList(ctx, newPR)
+func (r *PackageDeploymentReconciler) getClusterList(ctx context.Context,
+	pd *automationv1alpha1.PackageDeployment) (*infrav1alpha1.ClusterList, error) {
+	selector, err := metav1.LabelSelectorAsSelector(pd.Spec.Selector)
 	if err != nil {
-		r.l.Error(err, "could not load resources", "newPR", newPR, "cluster", c)
-		return err
+		r.l.Error(err, "could not create selector", "pd", pd)
+		return nil, err
 	}
 
-	pkgBuf, err := porch.ResourcesToPackageBuffer(resources.Spec.Resources)
-	if err != nil {
-		r.l.Error(err, "could not parse resources", "newPR", newPR, "cluster", c)
-		return err
+	var clusterList infrav1alpha1.ClusterList
+	if err := r.List(ctx, &clusterList, client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		r.l.Error(err, "could not list clusters", "selector", selector)
+		return &clusterList, err
 	}
+	return &clusterList, nil
+}
 
-	r.l.Info("parsed resources", "resources", pkgBuf)
-
+func (r *PackageDeploymentReconciler) appendNamespaceNode(pkgBuf *kio.PackageBuffer,
+	targetNS string) (*yaml.RNode, error) {
 	nsIdx := -1
-	bindingResources := make(map[yaml.ResourceIdentifier]*yaml.RNode)
 	for i, n := range pkgBuf.Nodes {
 		// search for namespace
 		if n.GetApiVersion() == "v1" && n.GetKind() == "Namespace" {
 			nsIdx = i
 		}
+	}
 
+	// TODO: Add set-namespace function if it doesn't already exist
+	// Add a Namespace if it does not already exist in the package
+	if nsIdx != -1 {
+		return nil, nil
+	}
+	r.l.Info("No namespace found in package, adding one")
+
+	nsNode, err := yaml.Parse(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: ` + targetNS)
+	if err != nil {
+		r.l.Error(err, "could not parse namespace yaml", "targetNS", targetNS)
+		return nil, err
+	}
+	return nsNode, nil
+}
+
+func (r *PackageDeploymentReconciler) applyPackageMutations(ctx context.Context,
+	targetNS string,
+	c *infrav1alpha1.Cluster,
+	newPR *porchv1alpha1.PackageRevision) (*porchv1alpha1.PackageRevision, error) {
+
+	// Load the contents of the new variant
+	resources, err := r.loadResourceList(ctx, newPR)
+	if err != nil {
+		r.l.Error(err, "could not load resources", "newPR", newPR, "cluster", c)
+		return newPR, err
+	}
+
+	pkgBuf, err := porch.ResourcesToPackageBuffer(resources.Spec.Resources)
+	if err != nil {
+		r.l.Error(err, "could not parse resources", "newPR", newPR, "cluster", c)
+		return newPR, err
+	}
+
+	r.l.Info("parsed resources", "resources", pkgBuf)
+
+	nsNode, err := r.appendNamespaceNode(pkgBuf, targetNS)
+	if err != nil {
+		return newPR, err
+	}
+	if nsNode != nil {
+		pkgBuf.Nodes = append(pkgBuf.Nodes, nsNode)
+	}
+
+	bindingResources := make(map[yaml.ResourceIdentifier]*yaml.RNode)
+	for _, n := range pkgBuf.Nodes {
 		// search for binding resources
 		annotations := n.GetAnnotations()
 
@@ -233,22 +278,6 @@ func (r *PackageDeploymentReconciler) applyPackageMutations(ctx context.Context,
 				bindingResources[id] = n
 			}
 		}
-	}
-
-	// TODO: Add set-namespace function if it doesn't already exist
-	// Add a Namespace if it does not already exist in the package
-	if nsIdx == -1 {
-		r.l.Info("No namespace found in package, adding one")
-
-		nsNode, err := yaml.Parse(`apiVersion: v1
-kind: Namespace
-metadata:
-  name: ` + targetNS)
-		if err != nil {
-			r.l.Error(err, "could not parse namespace yaml", "targetNS", targetNS)
-			return err
-		}
-		pkgBuf.Nodes = append(pkgBuf.Nodes, nsNode)
 	}
 
 	// If a binding resource exists in the package, and one exists
@@ -275,7 +304,7 @@ metadata:
 				meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
 					Reason: "ResourceEncodeErr", Message: fmt.Sprintf("could not encode resource with apiVersion %q, kind %q, name %q, and namespace %q"+
 						" in the cluster: %s", id.APIVersion, id.Kind, c.Name, c.Namespace, err.Error())})
-				return err
+				return newPR, err
 			}
 
 			spNode, err := yaml.Parse(spYamlBuf.String())
@@ -283,23 +312,41 @@ metadata:
 				r.l.Error(err, "could not parse cluster object yaml", "spYaml", spYamlBuf.String())
 				meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
 					Reason: "ResourceParseErr", Message: err.Error()})
-				return err
+				return newPR, err
 			}
 
 			// set the spec on the one in the package to match our spec
 			field := spNode.Field("spec")
-			if err := pkgResource.SetMapField(field.Value, "spec"); err != nil {
-				str, _ := spNode.String()
-				r.l.Error(err, "could not set object spec", "spNode", str)
-				meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
-					Reason: "ResourceSpecErr", Message: err.Error()})
-				return err
-			}
+			nh := sha256.Sum256([]byte(field.Value.MustString()))
+			newHash, _ := encode(fmt.Sprintf("%x", nh))
 
-			meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionTrue,
-				Reason: "ResourceInjectedFromCluster", Message: fmt.Sprintf("resource with apiVersion %q, kind %q, name %q, and namespace %q injected "+
-					"to the package revision from the cluster",
-					id.APIVersion, id.Kind, c.Name, c.Namespace)})
+			annotations := pkgResource.GetAnnotations()
+			oldHash, hasOldHash := annotations[injectionHashKey]
+			r.l.Info("oldHash and newHash", "oldHash", oldHash, "newHash", newHash)
+			if !hasOldHash || newHash != oldHash {
+				r.l.Info("injection has changed; injecting spec into package resource")
+				annotations[injectionHashKey] = newHash
+
+				if err := pkgResource.SetAnnotations(annotations); err != nil {
+					r.l.Error(err, "could not set injection hash annotation", "spNode", spNode.MustString())
+					meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
+						Reason: "ResourceAnnotationErr", Message: err.Error()})
+					return newPR, err
+				}
+
+				if err := pkgResource.SetMapField(field.Value, "spec"); err != nil {
+					str, _ := spNode.String()
+					r.l.Error(err, "could not set object spec", "spNode", str)
+					meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse,
+						Reason: "ResourceSpecErr", Message: err.Error()})
+					return newPR, err
+				}
+
+				meta.SetStatusCondition(conditions, metav1.Condition{Type: conditionType, Status: metav1.ConditionTrue,
+					Reason: "ResourceInjectedFromCluster", Message: fmt.Sprintf("resource with apiVersion %q, kind %q, name %q, and namespace %q injected "+
+						"to the package revision from the cluster",
+						id.APIVersion, id.Kind, c.Name, c.Namespace)})
+			}
 
 			clusterResourceId := yaml.ResourceIdentifier{
 				TypeMeta: yaml.TypeMeta{
@@ -344,7 +391,7 @@ metadata:
 			nStr := n.MustString()
 			var kf kptfile.KptFile
 			if err := yaml.Unmarshal([]byte(nStr), &kf); err != nil {
-				return err
+				return newPR, err
 			}
 			if kf.Status == nil {
 				kf.Status = &kptfile.Status{}
@@ -359,6 +406,18 @@ metadata:
 
 	r.l.Info("updated package RNodes", "RNodes", pkgBuf.Nodes)
 
+	if err := r.updatePackageResources(ctx, newPR, resources, pkgBuf); err != nil {
+		return newPR, err
+	}
+
+	return newPR, nil
+}
+
+func (r *PackageDeploymentReconciler) updatePackageResources(ctx context.Context,
+	newPR *porchv1alpha1.PackageRevision,
+	resources *porchv1alpha1.PackageRevisionResources,
+	pkgBuf *kio.PackageBuffer) error {
+
 	// Save the package by creating an updated PackageRevisionResources
 	newResources, err := porch.CreateUpdatedResources(resources.Spec.Resources, pkgBuf)
 	if err != nil {
@@ -366,14 +425,28 @@ metadata:
 		return err
 	}
 
+	if !reflect.DeepEqual(newResources, resources.Spec.Resources) {
+		if newPR.Spec.Lifecycle == porchv1alpha1.PackageRevisionLifecyclePublished {
+			// we cannot update a published package revision, so we will have to create a new draft
+			newPR, err := r.createPackageRevisionCopy(ctx, newPR)
+			if err != nil {
+				r.l.Error(err, "could not copy package revision")
+				return err
+			}
+			resources, err = r.loadResourceList(ctx, newPR)
+			if err != nil {
+				r.l.Error(err, "could not load resources", "newPR", newPR)
+				return err
+			}
+		}
+	}
+
 	resources.Spec.Resources = newResources
 	if err := r.PorchClient.Update(ctx, resources); err != nil {
 		r.l.Error(err, "could not save updated resources")
 		return err
 	}
-
 	r.l.Info("updated PackageRevisionResources", "resources", resources)
-
 	return nil
 }
 
@@ -433,7 +506,6 @@ func (r *PackageDeploymentReconciler) startRequest(ctx context.Context, req ctrl
 }
 
 func (r *PackageDeploymentReconciler) loadPackageRevisions(ctx context.Context) error {
-
 	// Try to locate the package
 	// Brute force search :(
 	var prList porchv1alpha1.PackageRevisionList
@@ -488,6 +560,65 @@ func (r *PackageDeploymentReconciler) findPackageRevision(ns, repo, pkg, rev str
 	return list[0]
 }
 
+func (r *PackageDeploymentReconciler) findAndUpdateExistingRevision(ctx context.Context,
+	pd *automationv1alpha1.PackageDeployment,
+	c *infrav1alpha1.Cluster,
+	ns string,
+	newPackageName string) (*porchv1alpha1.PackageRevision, error) {
+	// check if the package already exists downstream
+	if byRepo, ok := r.packageRevs[ns]; ok {
+		if byPkg, ok := byRepo[c.RepositoryRef.Name]; ok {
+			if byRev, ok := byPkg[newPackageName]; ok {
+				// Look for a downstream package revision. We will update either
+				// the draft, or the latest published revision.
+				// TODO: Use owner refs to identify which package revisions
+				// we should look at (when porch is ready).
+				var draft *porchv1alpha1.PackageRevision
+				var latestPublished *porchv1alpha1.PackageRevision
+				// the first package revision number that porch assigns is "v1",
+				// so use v0 as a placeholder for comparison
+				latestVersion := "v0"
+				for _, pkgList := range byRev {
+					pkgRev := pkgList[0]
+					if pkgRev.Spec.Lifecycle != porchv1alpha1.PackageRevisionLifecyclePublished {
+						draft = pkgRev
+					} else {
+						switch cmp := semver.Compare(pkgRev.Spec.Revision, latestVersion); {
+						case cmp == 0:
+							// Same revision.
+						case cmp < 0:
+							// current < latest; no change
+						case cmp > 0:
+							// current > latest; update latest
+							latestVersion = pkgRev.Spec.Revision
+							latestPublished = pkgRev
+						}
+					}
+				}
+
+				if len(byRev) > 0 {
+					// If there is a downstream package revision draft, update and
+					// return it. We should never end up with more than one draft at a time.
+					if draft != nil {
+						if upstreamPR := r.discoverUpdate(ctx, draft, pd.Spec.PackageRef.Revision); upstreamPR == nil {
+							r.l.Info("draft revision found, but no update is needed")
+							return draft, nil
+						} else {
+							r.l.Info("updating the draft package revision")
+							return r.updateDraft(ctx, draft, upstreamPR)
+						}
+					}
+					// If no drafts, find the latest published package revision,
+					// copy, update, and return it.
+					r.l.Info("updating the latest published package revision")
+					return r.updateLatest(ctx, latestPublished, pd.Spec.PackageRef.Revision)
+				}
+			}
+		}
+	}
+	return nil, nil
+}
+
 func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 	pd *automationv1alpha1.PackageDeployment,
 	c *infrav1alpha1.Cluster,
@@ -520,56 +651,12 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 		newPackageName = *pd.Spec.Name
 	}
 
-	r.l.Info("looking for downstream package")
-
-	// check if the package already exists downstream
-	if byRepo, ok := r.packageRevs[ns]; ok {
-		if byPkg, ok := byRepo[c.RepositoryRef.Name]; ok {
-			if byRev, ok := byPkg[newPackageName]; ok {
-				// Look for a downstream package revision. We will update either
-				// the draft, or the latest published revision.
-				// TODO: Use owner refs to identify which package revisions
-				// we should look at (when porch is ready).
-				var draft *porchv1alpha1.PackageRevision
-				var latestPublished *porchv1alpha1.PackageRevision
-				// the first package revision number that porch assigns is "v1",
-				// so use v0 as a placeholder for now
-				latestVersion := "v0"
-				for _, pkgList := range byRev {
-					pkgRev := pkgList[0]
-					if pkgRev.Spec.Lifecycle != porchv1alpha1.PackageRevisionLifecyclePublished {
-						draft = pkgRev
-					} else {
-						switch cmp := semver.Compare(pkgRev.Spec.Revision, latestVersion); {
-						case cmp == 0:
-							// Same revision.
-						case cmp < 0:
-							// current < latest; no change
-						case cmp > 0:
-							// current > latest; update latest
-							latestVersion = pkgRev.Spec.Revision
-							latestPublished = pkgRev
-						}
-					}
-				}
-
-				if len(byRev) > 0 {
-					// If there is a downstream package revision draft, update and
-					// return it. We should never end up with more than one draft at a time.
-					if draft != nil {
-						if upstreamPR := r.discoverUpdate(ctx, draft, pd.Spec.PackageRef.Revision); upstreamPR == nil {
-							return draft, nil
-						} else {
-							return r.updateDraft(ctx, draft, upstreamPR)
-						}
-					}
-					// If no drafts, find the latest published package revision,
-					// copy, update, and return it.
-					r.l.Info("updating the latest published package revision")
-					return r.updateLatest(ctx, latestPublished, pd.Spec.PackageRef.Revision)
-				}
-			}
-		}
+	existing, err := r.findAndUpdateExistingRevision(ctx, pd, c, ns, newPackageName)
+	if err != nil {
+		r.l.Error(err, "error looking for existing downstream package")
+	}
+	if existing != nil {
+		return existing, nil
 	}
 
 	// If no downstream package revisions managed by this controller,
@@ -609,8 +696,7 @@ func (r *PackageDeploymentReconciler) ensurePackageRevision(ctx context.Context,
 			},
 		},
 	}
-	err := r.PorchClient.Create(ctx, newPR)
-	if err != nil {
+	if err := r.PorchClient.Create(ctx, newPR); err != nil {
 		return nil, err
 	}
 
@@ -702,6 +788,16 @@ func (r *PackageDeploymentReconciler) updateLatest(ctx context.Context,
 	if upstreamPR == nil {
 		return sourcePR, nil
 	}
+	draft, err := r.createPackageRevisionCopy(ctx, sourcePR)
+	if err != nil {
+		return nil, err
+	}
+	r.l.Info("updating the newly created draft")
+	return r.updateDraft(ctx, draft, upstreamPR)
+}
+
+func (r *PackageDeploymentReconciler) createPackageRevisionCopy(ctx context.Context,
+	sourcePR *porchv1alpha1.PackageRevision) (*porchv1alpha1.PackageRevision, error) {
 	newPR := &porchv1alpha1.PackageRevision{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "PackageRevision",
@@ -723,7 +819,6 @@ func (r *PackageDeploymentReconciler) updateLatest(ctx context.Context,
 	if err := r.PorchClient.Create(ctx, newPR); err != nil {
 		r.l.Error(err, "failed to create new package revision")
 		return nil, err
-
 	}
 
 	if err := r.loadPackageRevisions(ctx); err != nil {
@@ -738,8 +833,7 @@ func (r *PackageDeploymentReconciler) updateLatest(ctx context.Context,
 				drafts := byRev[""]
 				for _, draft := range drafts {
 					if draft.Spec.WorkspaceName == newPR.Spec.WorkspaceName {
-						r.l.Info("updating the newly created draft")
-						return r.updateDraft(ctx, draft, upstreamPR)
+						return draft, nil
 					}
 				}
 			}
@@ -827,4 +921,29 @@ func (r *PackageDeploymentReconciler) getUpstreamRevisions(ctx context.Context, 
 		}
 	}
 	return result, nil
+}
+
+// Copied from
+// https://github.com/kubernetes-sigs/kustomize/blob/84bd402cc0662c5df3f109c4f80c22611243c5f9/api/hasher/hasher.go#L26
+func encode(hex string) (string, error) {
+	if len(hex) < 15 {
+		return "", fmt.Errorf(
+			"input length must be at least 10")
+	}
+	enc := []rune(hex[:15])
+	for i := range enc {
+		switch enc[i] {
+		case '0':
+			enc[i] = 'g'
+		case '1':
+			enc[i] = 'h'
+		case '3':
+			enc[i] = 'k'
+		case 'a':
+			enc[i] = 'm'
+		case 'e':
+			enc[i] = 't'
+		}
+	}
+	return string(enc), nil
 }
