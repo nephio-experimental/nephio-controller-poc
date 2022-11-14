@@ -89,6 +89,14 @@ type PackageDeploymentReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.12.2/pkg/reconcile
 func (r *PackageDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	pd, err := r.startRequest(ctx, req)
+	if err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			r.l.Error(err, "cannot get pd")
+			return ctrl.Result{}, err
+		}
+		r.l.Info("cannot get resource, probably deleted", "error", err.Error())
+		return ctrl.Result{}, nil
+	}
 
 	// Find the clusters matching the selector
 	selector, err := metav1.LabelSelectorAsSelector(pd.Spec.Selector)
